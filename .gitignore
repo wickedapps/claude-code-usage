@@ -1,0 +1,6 @@
+/target
+/scripts/release.env
+.DS_Store
+*~
+*.swp
+.idea/

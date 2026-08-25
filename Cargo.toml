@@ -1,0 +1,32 @@
+[package]
+name = "claude-code-usage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Local usage and remaining limits for Claude Code"
+license = "ISC"
+readme = "README.md"
+authors = ["Shreyansh Kotak"]
+publish = false
+
+[[bin]]
+name = "claude-usage"
+path = "src/main.rs"
+
+[dependencies]
+# The exact GPUI commit is pinned by the committed Cargo.lock. Do NOT add `rev` here:
+# gpui-component depends on zed without one, and cargo treats `?rev=..` as a separate
+# source, which pulls two incompatible copies of gpui into the graph.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "14359a0cdd00657eb68fa946bfd99cd83c26e002" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "14359a0cdd00657eb68fa946bfd99cd83c26e002" }
+chrono = { version = "0.4", features = ["clock"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.12", features = ["json"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
