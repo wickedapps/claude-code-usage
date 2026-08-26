@@ -71,7 +71,7 @@ xcrun notarytool store-credentials <profile> \
   --apple-id you@example.com --team-id <TEAM_ID> --password <app-specific>
 ```
 
-Put that profile name in `release.env` as `NOTARY_PROFILE` and run the script again.
+Put that profile name in `release.env` as `NOTARY_PROFILE` and run the script again. The script notarizes and staples the app first, then puts that stapled copy in the DMG and notarizes the finished disk image.
 
 The app is signed with the hardened runtime, which notarization requires, and with no entitlements. It is deliberately not sandboxed: it runs the `claude` CLI through a login shell and reads Claude Code's keychain item, and the sandbox has no entitlement that permits either.
 

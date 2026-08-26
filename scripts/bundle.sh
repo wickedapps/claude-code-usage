@@ -56,6 +56,7 @@ OUT="$ROOT/target/bundle"
 APP="$OUT/$APP_NAME.app"
 DMG="$OUT/$BINARY-$VERSION.dmg"
 ZIP="$OUT/$BINARY-$VERSION.zip"
+NOTARY_APP_ZIP="$OUT/.notary-app.zip"
 
 echo "==> building $BINARY $VERSION"
 # Compiled into the binary so GPUI's window id matches the bundle id.
@@ -121,6 +122,19 @@ else
     codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 fi
 codesign --verify --strict --verbose=2 "$APP"
+
+# Staple the app before copying it into the disk image. Stapling only $APP
+# after the DMG exists would leave the app inside the DMG without its ticket.
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+    echo "==> notarizing app"
+    rm -f "$NOTARY_APP_ZIP"
+    ditto -c -k --keepParent "$APP" "$NOTARY_APP_ZIP"
+    xcrun notarytool submit "$NOTARY_APP_ZIP" \
+        --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    rm -f "$NOTARY_APP_ZIP"
+fi
 
 echo "==> packing disk image"
 STAGE="$OUT/dmg-stage"
@@ -219,8 +233,9 @@ if [ "$IDENTITY" != "-" ]; then
     codesign --verify --verbose=2 "$DMG"
 fi
 
+# ditto, not zip: it preserves the bundle's symlinks and resource forks. When
+# notarizing, $APP already has its ticket at this point.
 rm -f "$ZIP"
-# ditto, not zip: it preserves the bundle's symlinks and resource forks.
 ditto -c -k --keepParent "$APP" "$ZIP"
 
 if [ -z "${NOTARY_PROFILE:-}" ]; then
@@ -232,18 +247,16 @@ if [ -z "${NOTARY_PROFILE:-}" ]; then
     exit 0
 fi
 
-echo "==> notarizing"
-# Submit the disk image so Gatekeeper accepts the file people actually download.
-# Apple issues tickets for the DMG and the app nested inside it.
+echo "==> notarizing disk image"
+# The app inside already carries its ticket. Submit and staple the finished
+# disk image as a separate distribution artifact.
 xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
 
 xcrun stapler staple "$DMG"
-xcrun stapler staple "$APP"
-rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
 
 echo "==> verifying as Gatekeeper sees it"
 spctl --assess --type exec -vv "$APP"
+xcrun stapler validate "$APP"
 xcrun stapler validate "$DMG"
 
 echo

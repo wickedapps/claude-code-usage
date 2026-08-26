@@ -14,8 +14,9 @@ pub enum LoginItemStatus {
     /// Registered, but macOS is holding it until someone confirms in System
     /// Settings, or it has been switched off there.
     RequiresApproval,
-    /// There is no registration to speak of, which is what an unbundled build
-    /// always reports: `SMAppService` has no bundle to point launchd at.
+    /// Service Management could not find a registration record. A new app can
+    /// report this before its first `register` call, so this status alone does
+    /// not say whether the executable lives in an app bundle.
     NotFound,
 }
 
@@ -26,11 +27,44 @@ impl LoginItemStatus {
         matches!(self, Self::Enabled | Self::RequiresApproval)
     }
 
-    /// False under `cargo run`, where there is no bundle to register and the
-    /// switch would fail every time it was touched.
+    /// False under `cargo run`, where there is no app bundle to register. A
+    /// bundled app remains available when macOS reports `NotFound`, since the
+    /// first registration is what creates its Background Task Management row.
     pub fn is_available(self) -> bool {
-        !matches!(self, Self::NotFound)
+        if !matches!(self, Self::NotFound) {
+            return true;
+        }
+        is_bundled_app()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn is_bundled_app() -> bool {
+    std::env::current_exe().is_ok_and(|executable| is_app_bundle_executable(&executable))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_bundled_app() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn is_app_bundle_executable(executable: &std::path::Path) -> bool {
+    let Some(macos) = executable.parent() else {
+        return false;
+    };
+    let Some(contents) = macos.parent() else {
+        return false;
+    };
+    let Some(bundle) = contents.parent() else {
+        return false;
+    };
+
+    macos.file_name().is_some_and(|name| name == "MacOS")
+        && contents.file_name().is_some_and(|name| name == "Contents")
+        && bundle
+            .extension()
+            .is_some_and(|extension| extension == "app")
 }
 
 #[cfg(target_os = "macos")]
@@ -48,6 +82,7 @@ mod platform {
     const STATUS_NOT_REGISTERED: i64 = 0;
     const STATUS_ENABLED: i64 = 1;
     const STATUS_REQUIRES_APPROVAL: i64 = 2;
+    const STATUS_NOT_FOUND: i64 = 3;
 
     const UNKNOWN_FAILURE: &str = "macOS refused the change without saying why";
 
@@ -62,6 +97,7 @@ mod platform {
                 STATUS_NOT_REGISTERED => LoginItemStatus::NotRegistered,
                 STATUS_ENABLED => LoginItemStatus::Enabled,
                 STATUS_REQUIRES_APPROVAL => LoginItemStatus::RequiresApproval,
+                STATUS_NOT_FOUND => LoginItemStatus::NotFound,
                 _ => LoginItemStatus::NotFound,
             }
         }
@@ -124,3 +160,30 @@ pub fn set_enabled(_enabled: bool) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn open_login_items_settings() {}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::is_app_bundle_executable;
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_an_app_bundle_executable() {
+        assert!(is_app_bundle_executable(Path::new(
+            "/Applications/Claude Code Usage.app/Contents/MacOS/claude-usage"
+        )));
+    }
+
+    #[test]
+    fn rejects_an_unbundled_executable() {
+        assert!(!is_app_bundle_executable(Path::new(
+            "/project/target/debug/claude-usage"
+        )));
+    }
+
+    #[test]
+    fn rejects_a_similarly_named_directory() {
+        assert!(!is_app_bundle_executable(Path::new(
+            "/tmp/Claude Code Usage.app/MacOS/claude-usage"
+        )));
+    }
+}
