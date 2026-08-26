@@ -60,6 +60,10 @@ fn main() {
     macos::prepare();
 
     let app = gpui_platform::application().with_assets(Assets);
+    // Finder sends a reopen event to the existing process when its app bundle
+    // is launched again. Turn that into the same action as the status item's
+    // Open command, including when Start hidden left no window to begin with.
+    app.on_reopen(open_main_window);
 
     app.run(move |cx| {
         macos::become_accessory();
