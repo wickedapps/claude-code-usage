@@ -1,4 +1,5 @@
 use crate::auth::LOGIN_SHELL;
+use crate::settings::{MenuBarSettings, PercentMode};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -35,6 +36,59 @@ pub struct QuotaLimits {
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
     pub seven_day_opus: Option<QuotaWindow>,
+}
+
+/// Which of the three windows a figure belongs to. Carries both namings so the
+/// menu bar and the window cannot drift apart on what to call them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuotaKind {
+    FiveHour,
+    SevenDay,
+    Opus,
+}
+
+impl QuotaKind {
+    /// For the menu bar, where width is the whole constraint.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::FiveHour => "5h",
+            Self::SevenDay => "7d",
+            Self::Opus => "Opus",
+        }
+    }
+
+    /// For the dropdown and the window, which have room to spell it out.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FiveHour => "5-hour",
+            Self::SevenDay => "Weekly",
+            Self::Opus => "Opus weekly",
+        }
+    }
+}
+
+impl QuotaLimits {
+    /// The windows the menu bar has been asked for, shortest first, skipping any
+    /// the API did not report. Shared by the title and the dropdown so the two
+    /// always agree on what is being shown.
+    pub fn shown(&self, display: &MenuBarSettings) -> Vec<(QuotaKind, &QuotaWindow)> {
+        [
+            (
+                QuotaKind::FiveHour,
+                self.five_hour.as_ref(),
+                display.show_five_hour,
+            ),
+            (
+                QuotaKind::SevenDay,
+                self.seven_day.as_ref(),
+                display.show_seven_day,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, _, shown)| *shown)
+        .filter_map(|(kind, window, _)| window.map(|window| (kind, window)))
+        .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -211,12 +265,12 @@ fn claude_user_agent() -> &'static str {
 fn http_error(err: ureq::Error) -> String {
     match err {
         ureq::Error::Status(code, _) => status_error(code),
-        ureq::Error::Transport(transport) => format!("usage API: {transport}"),
+        ureq::Error::Transport(transport) => format!("Usage API: {transport}"),
     }
 }
 
 fn status_error(status: u16) -> String {
-    format!("usage API returned HTTP {status}")
+    format!("Usage API returned HTTP {status}")
 }
 
 fn home_join(relative: &str) -> Option<std::path::PathBuf> {
@@ -224,28 +278,61 @@ fn home_join(relative: &str) -> Option<std::path::PathBuf> {
 }
 
 impl QuotaWindow {
-    pub fn resets_label(&self) -> String {
+    pub fn timing_label(&self, kind: QuotaKind) -> String {
         let Some(resets_at) = self.resets_at else {
-            return "reset time unknown".into();
+            return match kind {
+                QuotaKind::FiveHour => "Starts when you send a message",
+                QuotaKind::SevenDay | QuotaKind::Opus => "Reset time unknown",
+            }
+            .into();
         };
         let now = Utc::now();
         if resets_at <= now {
-            return "reset due".into();
+            return "Reset due".into();
         }
         let remaining = resets_at - now;
-        format!("resets in {}", format_duration(remaining))
+        format!("Resets in {}", format_duration(remaining, " "))
+    }
+
+    /// The bare figure, in whichever direction was asked for.
+    pub fn percent(&self, mode: PercentMode) -> f64 {
+        match mode {
+            PercentMode::Left => self.remaining,
+            PercentMode::Used => self.used,
+        }
+    }
+
+    /// `62% left` or `38% used`, for anywhere with room for the word.
+    pub fn percent_label(&self, mode: PercentMode) -> String {
+        match mode {
+            PercentMode::Left => format!("{:.0}% left", self.remaining),
+            PercentMode::Used => format!("{:.0}% used", self.used),
+        }
+    }
+
+    /// `2h41m`, for the menu bar, where `timing_label`'s wording would not fit.
+    /// `None` when the API did not say when the window turns over.
+    pub fn countdown_label(&self) -> Option<String> {
+        let resets_at = self.resets_at?;
+        let remaining = resets_at - Utc::now();
+        if remaining <= Duration::zero() {
+            return Some("due".into());
+        }
+        Some(format_duration(remaining, ""))
     }
 }
 
-fn format_duration(duration: Duration) -> String {
+/// The separator is what tells the two callers apart: the window and the
+/// dropdown read `2h 41m`, the menu bar packs it to `2h41m`.
+fn format_duration(duration: Duration, separator: &str) -> String {
     let minutes = duration.num_minutes().max(0);
     let days = minutes / (60 * 24);
     let hours = (minutes / 60) % 24;
     let mins = minutes % 60;
     if days > 0 {
-        format!("{days}d {hours}h")
+        format!("{days}d{separator}{hours}h")
     } else if hours > 0 {
-        format!("{hours}h {mins}m")
+        format!("{hours}h{separator}{mins}m")
     } else {
         format!("{mins}m")
     }
@@ -258,8 +345,26 @@ mod tests {
     #[test]
     fn unauthorized_is_a_dead_token_not_a_failed_refresh() {
         assert!(is_unauthorized(MISSING_TOKEN));
-        assert!(is_unauthorized("usage API returned HTTP 401"));
-        assert!(!is_unauthorized("usage API returned HTTP 500"));
-        assert!(!is_unauthorized("usage API: connection reset"));
+        assert!(is_unauthorized("Usage API returned HTTP 401"));
+        assert!(!is_unauthorized("Usage API returned HTTP 500"));
+        assert!(!is_unauthorized("Usage API: connection reset"));
+    }
+
+    #[test]
+    fn an_unopened_five_hour_window_explains_when_it_starts() {
+        let window = QuotaWindow {
+            used: 0.0,
+            remaining: 100.0,
+            resets_at: None,
+        };
+
+        assert_eq!(
+            window.timing_label(QuotaKind::FiveHour),
+            "Starts when you send a message"
+        );
+        assert_eq!(
+            window.timing_label(QuotaKind::SevenDay),
+            "Reset time unknown"
+        );
     }
 }

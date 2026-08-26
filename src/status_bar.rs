@@ -1,6 +1,6 @@
-//! The menu bar item: a text readout of the remaining limits, and the menu it
-//! drops down. GPUI has no binding for `NSStatusItem`, so this talks to AppKit
-//! the same way `macos.rs` does for the application icon.
+//! The menu bar item: a text readout of the limits, and the menu it drops down.
+//! GPUI has no binding for `NSStatusItem`, so this talks to AppKit the same way
+//! `macos.rs` does for the application icon.
 #![allow(unexpected_cfgs)]
 
 /// Picked from the status item's menu.
@@ -8,16 +8,18 @@
 pub enum MenuAction {
     Refresh,
     Open,
+    Settings,
     Quit,
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::{install, set_limits, set_title};
+pub use platform::{install, set_menu_bar, set_title};
 
 #[cfg(target_os = "macos")]
 mod platform {
     use super::MenuAction;
-    use crate::limits::{QuotaLimits, QuotaWindow};
+    use crate::limits::{QuotaKind, QuotaLimits, QuotaWindow};
+    use crate::settings::{MenuBarSettings, PercentMode};
     use cocoa::base::{NO, YES, id, nil};
     use cocoa::foundation::NSString;
     use objc::declare::ClassDecl;
@@ -33,13 +35,15 @@ mod platform {
     const FONT_WEIGHT_REGULAR: f64 = 0.0;
     /// Name of the class declared below to receive the menu's actions.
     const TARGET_CLASS: &str = "ClaudeUsageStatusBarTarget";
+    /// One row per quota window the settings can ask for.
+    const INFO_ITEMS: usize = 2;
 
     struct StatusBar {
         item: id,
-        five_hour: id,
-        weekly: id,
+        info: [id; INFO_ITEMS],
         separator: id,
         limits: Option<QuotaLimits>,
+        display: MenuBarSettings,
     }
 
     thread_local! {
@@ -74,15 +78,17 @@ mod platform {
             let target: id = msg_send![action_target_class(), new];
             let menu: id = msg_send![class!(NSMenu), new];
             // Limit lines are filled in when the menu opens, from whatever the
-            // store last handed us. Hidden until then so an empty pair does not
-            // sit above Refresh on the first click.
-            let five_hour = add_info_item(menu);
-            let weekly = add_info_item(menu);
+            // store last handed us. Hidden until then so an empty set does not
+            // sit above Refresh on the first click. There is one row per window
+            // the settings can turn on, and the rows in use are always the
+            // first of them, so a hidden row never leaves a gap.
+            let info = [add_info_item(menu), add_info_item(menu)];
             let separator: id = msg_send![class!(NSMenuItem), separatorItem];
             let _: () = msg_send![separator, setHidden: YES];
             let _: () = msg_send![menu, addItem: separator];
             add_item(menu, "Refresh", sel!(refreshClicked:), target);
             add_item(menu, "Open Claude Code Usage", sel!(openClicked:), target);
+            add_item(menu, "Settings…", sel!(settingsClicked:), target);
             let actions_separator: id = msg_send![class!(NSMenuItem), separatorItem];
             let _: () = msg_send![menu, addItem: actions_separator];
             add_item(menu, "Quit", sel!(quitClicked:), target);
@@ -92,10 +98,10 @@ mod platform {
             STATUS_ITEM.with(|slot| {
                 *slot.borrow_mut() = Some(StatusBar {
                     item,
-                    five_hour,
-                    weekly,
+                    info,
                     separator,
                     limits: None,
+                    display: MenuBarSettings::default(),
                 });
             });
         }
@@ -118,12 +124,15 @@ mod platform {
         });
     }
 
-    /// Keeps a copy of the windows so the menu can write remaining and reset
-    /// times at the moment it opens, not at the last poll.
-    pub fn set_limits(limits: Option<QuotaLimits>) {
+    /// Keeps a copy of the windows and of what to make of them, so the menu can
+    /// write its rows at the moment it opens rather than at the last poll. The
+    /// countdowns are the reason: handing over finished strings would freeze
+    /// them at whenever the fetch landed.
+    pub fn set_menu_bar(limits: Option<QuotaLimits>, display: MenuBarSettings) {
         STATUS_ITEM.with(|slot| {
             if let Some(bar) = slot.borrow_mut().as_mut() {
                 bar.limits = limits;
+                bar.display = display;
             }
         });
     }
@@ -158,49 +167,53 @@ mod platform {
         }
     }
 
+    /// Writes the rows the settings ask for into the rows the menu has, from the
+    /// top, and hides whatever is left over.
     fn apply_info_items() {
         STATUS_ITEM.with(|slot| {
             let slot = slot.borrow();
             let Some(bar) = slot.as_ref() else {
                 return;
             };
+            let shown = bar
+                .limits
+                .as_ref()
+                .map(|limits| limits.shown(&bar.display))
+                .unwrap_or_default();
             unsafe {
-                let five_shown = apply_info_item(
-                    bar.five_hour,
-                    "5-hour",
-                    bar.limits
-                        .as_ref()
-                        .and_then(|limits| limits.five_hour.as_ref()),
-                );
-                let weekly_shown = apply_info_item(
-                    bar.weekly,
-                    "Weekly",
-                    bar.limits
-                        .as_ref()
-                        .and_then(|limits| limits.seven_day.as_ref()),
-                );
-                let hide_separator = if five_shown || weekly_shown { NO } else { YES };
+                for (index, item) in bar.info.iter().enumerate() {
+                    match shown.get(index) {
+                        Some((kind, window)) => {
+                            apply_info_item(*item, *kind, window, bar.display.percent)
+                        }
+                        None => {
+                            let _: () = msg_send![*item, setHidden: YES];
+                        }
+                    }
+                }
+                let hide_separator = if shown.is_empty() { YES } else { NO };
                 let _: () = msg_send![bar.separator, setHidden: hide_separator];
             }
         });
     }
 
-    unsafe fn apply_info_item(item: id, label: &str, window: Option<&QuotaWindow>) -> bool {
+    unsafe fn apply_info_item(
+        item: id,
+        kind: QuotaKind,
+        window: &QuotaWindow,
+        percent: PercentMode,
+    ) {
         unsafe {
-            let Some(window) = window else {
-                let _: () = msg_send![item, setHidden: YES];
-                return false;
-            };
             let title = format!(
-                "{label}: {:.0}% left, {}",
-                window.remaining,
-                window.resets_label()
+                "{}: {}, {}",
+                kind.label(),
+                window.percent_label(percent),
+                window.timing_label(kind)
             );
             let text = NSString::alloc(nil).init_str(&title);
             let _: () = msg_send![item, setTitle: text];
             let _: () = msg_send![text, release];
             let _: () = msg_send![item, setHidden: NO];
-            true
         }
     }
 
@@ -224,6 +237,10 @@ mod platform {
                 open_clicked as extern "C" fn(&Object, Sel, id),
             );
             decl.add_method(
+                sel!(settingsClicked:),
+                settings_clicked as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(
                 sel!(quitClicked:),
                 quit_clicked as extern "C" fn(&Object, Sel, id),
             );
@@ -241,6 +258,10 @@ mod platform {
 
     extern "C" fn open_clicked(_: &Object, _: Sel, _: id) {
         dispatch(MenuAction::Open);
+    }
+
+    extern "C" fn settings_clicked(_: &Object, _: Sel, _: id) {
+        dispatch(MenuAction::Settings);
     }
 
     extern "C" fn quit_clicked(_: &Object, _: Sel, _: id) {
@@ -268,4 +289,8 @@ pub fn install(_on_action: impl Fn(MenuAction) + 'static) {}
 pub fn set_title(_title: &str) {}
 
 #[cfg(not(target_os = "macos"))]
-pub fn set_limits(_limits: Option<crate::limits::QuotaLimits>) {}
+pub fn set_menu_bar(
+    _limits: Option<crate::limits::QuotaLimits>,
+    _display: crate::settings::MenuBarSettings,
+) {
+}

@@ -4,6 +4,7 @@
 
 use crate::limits::{self, QuotaLimits};
 use crate::session::{self, Session};
+use crate::settings::SettingsStore;
 use crate::usage::UsageReport;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, Global, SharedString};
@@ -11,12 +12,17 @@ use std::time::Duration;
 
 /// How often the limits are re-checked with the window open. Ticks hit the OAuth
 /// endpoint only; rescanning every transcript this often would be a lot of work
-/// for figures nobody is looking at unless the window is up.
+/// for figures nobody is looking at unless the window is up. Not a setting: a
+/// window on screen is a window being watched.
 const ACTIVE_POLL: Duration = Duration::from_secs(60);
-/// The same, with only the menu bar showing. Nothing here is being read closely,
-/// and the 5-hour window moves slowly enough that five minutes is no worse.
-const PARKED_POLL: Duration = Duration::from_secs(300);
+/// How often the loop wakes. With only the menu bar showing the interval is the
+/// user's to pick, and waiting the whole of it in one sleep would mean a change
+/// from fifteen minutes down to one took fifteen minutes to notice. Waking on
+/// this cadence and counting up to the interval instead costs a comparison a
+/// minute and takes hold within one.
+const POLL_TICK: Duration = Duration::from_secs(60);
 
+#[derive(Default)]
 pub struct UsageStore {
     pub loading: bool,
     pub logged_in: Option<bool>,
@@ -25,24 +31,10 @@ pub struct UsageStore {
     pub usage_error: Option<SharedString>,
     pub limits_error: Option<SharedString>,
     pub auth_error: Option<SharedString>,
-    /// Only sets the polling rate. The window keeps its own state.
+    /// Only sets the polling rate. The window keeps its own state. `init` gives
+    /// it its real value: the settings can ask for a launch that puts no window
+    /// on screen at all, so a default of false is the honest one.
     window_open: bool,
-}
-
-impl Default for UsageStore {
-    fn default() -> Self {
-        Self {
-            loading: false,
-            logged_in: None,
-            usage: None,
-            limits: None,
-            usage_error: None,
-            limits_error: None,
-            auth_error: None,
-            // The window opens straight after the store is built.
-            window_open: true,
-        }
-    }
 }
 
 struct GlobalUsageStore(Entity<UsageStore>);
@@ -59,10 +51,14 @@ enum Tick {
 
 impl UsageStore {
     /// Creates the store, starts the first load, and leaves the poll loop
-    /// running for the life of the process.
-    pub fn init(cx: &mut App) -> Entity<Self> {
+    /// running for the life of the process. `window_open` is whether a window is
+    /// going up with it, which only sets the polling rate.
+    pub fn init(window_open: bool, cx: &mut App) -> Entity<Self> {
         let store = cx.new(|cx| {
-            let mut this = Self::default();
+            let mut this = Self {
+                window_open,
+                ..Self::default()
+            };
             this.reload(cx);
             this.poll(cx);
             this
@@ -162,16 +158,25 @@ impl UsageStore {
     /// is picked up without touching the app.
     fn poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            let mut waited = Duration::ZERO;
             loop {
-                let interval = this.update(cx, |this, _| {
-                    if this.window_open {
+                cx.background_executor().timer(POLL_TICK).await;
+                waited += POLL_TICK;
+
+                let due = this.update(cx, |this, cx| {
+                    let interval = if this.window_open {
                         ACTIVE_POLL
                     } else {
-                        PARKED_POLL
-                    }
+                        SettingsStore::get(cx).refresh.interval()
+                    };
+                    waited >= interval
                 });
-                let Ok(interval) = interval else { return };
-                cx.background_executor().timer(interval).await;
+                // The store is gone, which only happens on the way out.
+                let Ok(due) = due else { return };
+                if !due {
+                    continue;
+                }
+                waited = Duration::ZERO;
 
                 let tick = this.update(cx, |this, _| {
                     if this.loading {
@@ -182,7 +187,6 @@ impl UsageStore {
                         Tick::Full
                     }
                 });
-                // The store is gone, which only happens on the way out.
                 let Ok(tick) = tick else { return };
 
                 match tick {

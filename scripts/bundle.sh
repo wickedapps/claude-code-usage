@@ -25,7 +25,7 @@ APP_NAME="Claude Code Usage"
 PLACEHOLDER_BUNDLE_ID=com.example.claude-usage
 # Baked into the signature and remembered by macOS, so treat it as permanent.
 BUNDLE_ID=${BUNDLE_ID:-$PLACEHOLDER_BUNDLE_ID}
-MIN_MACOS=11.0
+MIN_MACOS=13.0
 CATEGORY=public.app-category.developer-tools
 VERSION=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
