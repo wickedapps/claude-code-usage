@@ -582,7 +582,7 @@ fn tab_columns(tab: usize) -> (&'static str, &'static str) {
     match tab {
         1 => ("Week", "Models"),
         2 => ("Month", "Models"),
-        3 => ("Session", "Last"),
+        3 => ("Session", "Last active"),
         4 => ("Started", "Status"),
         _ => ("Day", "Models"),
     }
@@ -590,13 +590,14 @@ fn tab_columns(tab: usize) -> (&'static str, &'static str) {
 
 fn render_usage_table(rows: &[UsageRow], tab: usize, cx: &App) -> impl IntoElement {
     let (first, second) = tab_columns(tab);
+    let basis = title_basis(tab);
     Table::new()
         .w_full()
         .border_0()
         .child(
             TableHeader::new().bg(cx.theme().background).child(
                 TableRow::new()
-                    .child(text_head(first))
+                    .child(text_head(first).flex_basis(relative(basis)))
                     .child(text_head(second))
                     .child(token_head("Input"))
                     .child(token_head("Output"))
@@ -605,17 +606,24 @@ fn render_usage_table(rows: &[UsageRow], tab: usize, cx: &App) -> impl IntoEleme
                     .child(token_head("Total")),
             ),
         )
-        .child(TableBody::new().children(rows.iter().map(|row| usage_table_row(row, cx))))
+        .child(TableBody::new().children(rows.iter().map(|row| usage_table_row(row, basis, cx))))
 }
 
-fn usage_table_row(row: &UsageRow, cx: &App) -> TableRow {
+/// Share of the row the first column takes, against 1.0 for every other column.
+/// A session title carries a project name and an id, which needs more room than
+/// a date does.
+fn title_basis(tab: usize) -> f32 {
+    if tab == 3 { 2. } else { 1. }
+}
+
+fn usage_table_row(row: &UsageRow, basis: f32, cx: &App) -> TableRow {
     let total_color = if row.active {
         cx.theme().success
     } else {
         cx.theme().foreground
     };
     TableRow::new()
-        .child(text_cell(row.title.clone()))
+        .child(text_cell(row.title.clone()).flex_basis(relative(basis)))
         .child(text_cell(row.detail.clone()).text_color(cx.theme().muted_foreground))
         .child(token_cell(row.tokens.input))
         .child(token_cell(row.tokens.output))

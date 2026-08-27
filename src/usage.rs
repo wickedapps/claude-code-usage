@@ -17,6 +17,9 @@ const USAGE_MARKER: &str = "\"usage\":{";
 const MODEL_LABEL_SEGMENTS: usize = 3;
 /// Length of the `20251101` date stamp that trails most model ids.
 const MODEL_DATE_LEN: usize = 8;
+/// Leading characters of a session id kept in the table: enough to tell two
+/// runs in the same project apart, and to match the transcript file name.
+const SESSION_ID_CHARS: usize = 8;
 const PROJECTS_DIR: &str = "projects";
 /// Comma-separated list of Claude config directories, set by the user.
 const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
@@ -63,6 +66,7 @@ pub struct UsageReport {
 struct Entry {
     timestamp: DateTime<Utc>,
     session_id: String,
+    project: String,
     model: String,
     tokens: TokenCounts,
     message_id: Option<String>,
@@ -79,6 +83,8 @@ struct Line {
     session_id: Option<String>,
     #[serde(default, rename = "isSidechain")]
     is_sidechain: Option<bool>,
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     message: Option<Message>,
 }
@@ -294,9 +300,11 @@ fn read_file(path: &Path, out: &mut Vec<Entry>) {
             .clone()
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| session_id.clone());
+        let project = parsed.cwd.as_deref().map(project_name).unwrap_or_default();
         out.push(Entry {
             timestamp,
             session_id: session.clone(),
+            project: project.clone(),
             model,
             tokens,
             message_id: message.id.clone(),
@@ -315,6 +323,7 @@ fn read_file(path: &Path, out: &mut Vec<Entry>) {
             out.push(Entry {
                 timestamp,
                 session_id: session.clone(),
+                project: project.clone(),
                 model: advisor_model,
                 tokens: TokenCounts {
                     input: iteration.input_tokens,
@@ -422,22 +431,32 @@ fn aggregate_monthly(entries: &[Entry]) -> Vec<UsageRow> {
 
 fn aggregate_sessions(entries: &[Entry]) -> Vec<UsageRow> {
     let mut buckets: BTreeMap<String, Bucket> = BTreeMap::new();
+    let mut projects: HashMap<String, String> = HashMap::new();
     for entry in entries {
         buckets
             .entry(entry.session_id.clone())
             .or_default()
             .add(entry);
+        if !entry.project.is_empty() {
+            projects
+                .entry(entry.session_id.clone())
+                .or_insert_with(|| entry.project.clone());
+        }
     }
     let mut rows: Vec<(u64, UsageRow)> = buckets
         .into_iter()
         .map(|(session_id, bucket)| {
             let last = bucket
                 .last
-                .map(local_date)
+                .map(format_session_date)
                 .unwrap_or_else(|| "unknown".into());
             (
                 bucket.tokens.total(),
-                usage_row(short_session(&session_id), format_day_key(&last), bucket),
+                usage_row(
+                    session_title(projects.get(&session_id), &session_id),
+                    last,
+                    bucket,
+                ),
             )
         })
         .collect();
@@ -595,6 +614,15 @@ fn usage_row(title: String, detail: String, bucket: Bucket) -> UsageRow {
     }
 }
 
+/// Always with the year. Unlike the day, week, and month tabs, this list is
+/// ordered by token count, so nothing around a date says which year it fell in.
+fn format_session_date(timestamp: DateTime<Utc>) -> String {
+    timestamp
+        .with_timezone(&Local)
+        .format("%b %d, %Y")
+        .to_string()
+}
+
 fn format_day_key(key: &str) -> String {
     let Ok(date) = NaiveDate::parse_from_str(key, "%Y-%m-%d") else {
         return key.to_string();
@@ -644,15 +672,36 @@ fn is_date_suffix(part: &str) -> bool {
     part.len() == MODEL_DATE_LEN && part.chars().all(|ch| ch.is_ascii_digit())
 }
 
-fn short_session(session_id: &str) -> String {
-    let parts: Vec<_> = session_id.split('-').collect();
-    if parts.len() >= 2 {
-        format!("{}-{}", parts[parts.len() - 2], parts[parts.len() - 1])
-    } else if session_id.len() > 16 {
-        session_id[session_id.len() - 16..].to_string()
-    } else {
-        session_id.to_string()
+/// Sessions carry no name of their own, so the folder Claude Code was launched
+/// in stands in for one. Transcripts record it on every line as `cwd`.
+fn project_name(cwd: &str) -> String {
+    Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(cwd)
+        .to_string()
+}
+
+/// The project reads as the session's name; the id trailing it keeps two
+/// sessions in the same project apart. Sessions predating the `cwd` field, or
+/// rolled up from a path, have only the id.
+fn session_title(project: Option<&String>, session_id: &str) -> String {
+    let short = short_session(session_id);
+    match project {
+        Some(project) => format!("{project} · {short}"),
+        None => short,
     }
+}
+
+fn short_session(session_id: &str) -> String {
+    session_id
+        .split('-')
+        .next()
+        .unwrap_or(session_id)
+        .chars()
+        .take(SESSION_ID_CHARS)
+        .collect()
 }
 
 fn models_label(models: &BTreeSet<String>) -> String {
