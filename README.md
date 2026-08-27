@@ -73,6 +73,25 @@ xcrun notarytool store-credentials <profile> \
 
 Put that profile name in `release.env` as `NOTARY_PROFILE` and run the script again. The script notarizes and staples the app first, then puts that stapled copy in the DMG and notarizes the finished disk image.
 
+### Cutting a release
+
+Bump `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` picks the new version up, and commit both with the change they ship. Then bundle, tag, and publish:
+
+```sh
+sh scripts/bundle.sh                 # reads the version from Cargo.toml
+V=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+
+git push origin master
+git tag -a "v$V" -m "v$V"
+git push origin "v$V"
+
+gh release create "v$V" --title "v$V" --notes "..." \
+  "target/bundle/claude-usage-$V.dmg" \
+  "target/bundle/claude-usage-$V.zip"
+```
+
+Bundle before tagging, so what ships is built from the commit the tag names. `xcrun stapler validate target/bundle/claude-usage-$V.dmg` confirms the notarization ticket made it into the disk image before you upload it.
+
 The app is signed with the hardened runtime, which notarization requires, and with no entitlements. It is deliberately not sandboxed: it runs the `claude` CLI through a login shell and reads Claude Code's keychain item, and the sandbox has no entitlement that permits either.
 
 ## Icon
