@@ -22,6 +22,7 @@ fi
 
 BINARY=claude-usage
 APP_NAME="Claude Code Usage"
+WIDGET_NAME=ClaudeUsageWidget
 PLACEHOLDER_BUNDLE_ID=com.example.claude-usage
 # Baked into the signature and remembered by macOS, so treat it as permanent.
 BUNDLE_ID=${BUNDLE_ID:-$PLACEHOLDER_BUNDLE_ID}
@@ -48,6 +49,26 @@ if [ "$IDENTITY" = "-" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
     exit 1
 fi
 
+# A WidgetKit extension cannot share the host's snapshot under an ad-hoc
+# signature because that signature has no developer team identity. Keep the
+# useful local bundle in that case, but leave out the nonworking extension.
+INCLUDE_WIDGET=1
+APP_GROUP_ID=
+if [ "$IDENTITY" = "-" ]; then
+    INCLUDE_WIDGET=0
+    echo "widget omitted: an ad-hoc signature has no App Group identity."
+else
+    TEAM_ID=${TEAM_ID:-$(
+        printf '%s\n' "$IDENTITY" |
+            sed -n 's/.*(\([A-Za-z0-9]*\))$/\1/p'
+    )}
+    if [ -z "$TEAM_ID" ]; then
+        echo "could not derive TEAM_ID from SIGN_IDENTITY; set TEAM_ID in scripts/release.env" >&2
+        exit 1
+    fi
+    APP_GROUP_ID="$TEAM_ID.$BUNDLE_ID"
+fi
+
 if [ "$BUNDLE_ID" = "$PLACEHOLDER_BUNDLE_ID" ]; then
     echo "warning: signing as $BUNDLE_ID. Set BUNDLE_ID in scripts/release.env" >&2
 fi
@@ -57,16 +78,44 @@ APP="$OUT/$APP_NAME.app"
 DMG="$OUT/$BINARY-$VERSION.dmg"
 ZIP="$OUT/$BINARY-$VERSION.zip"
 NOTARY_APP_ZIP="$OUT/.notary-app.zip"
+WIDGET_DERIVED="$OUT/widget-build"
+WIDGET_PRODUCT="$WIDGET_DERIVED/Build/Products/Release/$WIDGET_NAME.appex"
+APP_ENTITLEMENTS="$OUT/.app.entitlements"
+WIDGET_ENTITLEMENTS="$OUT/.widget.entitlements"
 
 echo "==> building $BINARY $VERSION"
 # Compiled into the binary so GPUI's window id matches the bundle id.
-APP_BUNDLE_ID="$BUNDLE_ID" cargo build --release
+if [ "$INCLUDE_WIDGET" -eq 1 ]; then
+    APP_BUNDLE_ID="$BUNDLE_ID" APP_GROUP_ID="$APP_GROUP_ID" cargo build --release
+else
+    APP_BUNDLE_ID="$BUNDLE_ID" cargo build --release
+fi
+
+if [ "$INCLUDE_WIDGET" -eq 1 ]; then
+    echo "==> building widget"
+    xcodebuild \
+        -project widget/ClaudeUsageWidget.xcodeproj \
+        -scheme "$WIDGET_NAME" \
+        -configuration Release \
+        -derivedDataPath "$WIDGET_DERIVED" \
+        CODE_SIGNING_ALLOWED=NO \
+        ONLY_ACTIVE_ARCH=YES \
+        HOST_BUNDLE_ID="$BUNDLE_ID" \
+        APP_GROUP_ID="$APP_GROUP_ID" \
+        MARKETING_VERSION="$VERSION" \
+        CURRENT_PROJECT_VERSION="$VERSION" \
+        build
+fi
 
 echo "==> assembling $APP_NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "target/release/$BINARY" "$APP/Contents/MacOS/$BINARY"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+if [ "$INCLUDE_WIDGET" -eq 1 ]; then
+    mkdir -p "$APP/Contents/PlugIns"
+    ditto "$WIDGET_PRODUCT" "$APP/Contents/PlugIns/$WIDGET_NAME.appex"
+fi
 
 # LSUIElement is what keeps the Dock tile from flashing before the app has a
 # window to show. The binary sets the policy itself from then on, switching to
@@ -97,6 +146,17 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 	<string>$VERSION</string>
 	<key>CFBundleVersion</key>
 	<string>$VERSION</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$BUNDLE_ID</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$BUNDLE_ID</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSApplicationCategoryType</key>
 	<string>$CATEGORY</string>
 	<key>LSMinimumSystemVersion</key>
@@ -110,18 +170,56 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-# No entitlements file, and deliberately no App Sandbox. The app runs the claude
-# CLI through a login shell and reads Claude Code's keychain item, and the
-# sandbox has no entitlement that would allow either. The hardened runtime that
-# notarization requires does not block spawning child processes.
+# The main app stays outside App Sandbox because it runs the claude CLI and
+# reads Claude Code's keychain item. A signed widget build gives it only the App
+# Group entitlement used for the snapshot. The extension itself is sandboxed.
+if [ "$INCLUDE_WIDGET" -eq 1 ]; then
+    cat >"$APP_ENTITLEMENTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$APP_GROUP_ID</string>
+	</array>
+</dict>
+</plist>
+PLIST
+    cat >"$WIDGET_ENTITLEMENTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$APP_GROUP_ID</string>
+	</array>
+</dict>
+</plist>
+PLIST
+    plutil -lint "$APP_ENTITLEMENTS" "$WIDGET_ENTITLEMENTS" >/dev/null
+fi
+
 echo "==> signing as $IDENTITY"
 if [ "$IDENTITY" = "-" ]; then
     # A timestamp needs a real certificate, so ad-hoc goes without one.
     codesign --force --options runtime --sign - "$APP"
 else
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+    codesign \
+        --force --options runtime --timestamp \
+        --entitlements "$WIDGET_ENTITLEMENTS" \
+        --sign "$IDENTITY" \
+        "$APP/Contents/PlugIns/$WIDGET_NAME.appex"
+    codesign \
+        --force --options runtime --timestamp \
+        --entitlements "$APP_ENTITLEMENTS" \
+        --sign "$IDENTITY" \
+        "$APP"
 fi
-codesign --verify --strict --verbose=2 "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 # Staple the app before copying it into the disk image. Stapling only $APP
 # after the DMG exists would leave the app inside the DMG without its ticket.

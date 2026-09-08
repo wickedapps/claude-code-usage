@@ -15,6 +15,7 @@ mod settings;
 mod status_bar;
 mod store;
 mod usage;
+mod widget;
 
 use app::AppView;
 use assets::Assets;
@@ -60,6 +61,12 @@ fn main() {
     macos::prepare();
 
     let app = gpui_platform::application().with_assets(Assets);
+    let (url_tx, mut url_rx) = mpsc::unbounded();
+    app.on_open_urls(move |urls| {
+        if urls.iter().any(|url| is_app_url(url)) {
+            url_tx.unbounded_send(()).ok();
+        }
+    });
     // Finder sends a reopen event to the existing process when its app bundle
     // is launched again. Turn that into the same action as the status item's
     // Open command, including when Start hidden left no window to begin with.
@@ -84,12 +91,26 @@ fn main() {
 
         let store = UsageStore::init(!start_hidden, cx);
         init_status_bar(&store, &settings, cx);
+        // Widget clicks arrive as the app's private URL scheme. The platform
+        // callback runs outside a GPUI update, so cross the same kind of channel
+        // the native status menu uses below.
+        cx.spawn(async move |cx| {
+            while url_rx.next().await.is_some() {
+                cx.update(open_main_window);
+            }
+        })
+        .detach();
         // A launch nobody asked for, at login, should not put a window in front
         // of whatever they were doing. The status item is already up either way.
         if !start_hidden {
             open_main_window(cx);
         }
     });
+}
+
+fn is_app_url(url: &str) -> bool {
+    url.split_once(':')
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case(APP_ID))
 }
 
 /// The one window, kept across hides so Open has something to bring back. The
@@ -198,11 +219,11 @@ fn init_status_bar(store: &Entity<UsageStore>, settings: &Entity<SettingsStore>,
         tx.unbounded_send(action).ok();
     });
 
-    sync_status_bar(cx);
-    cx.observe(store, |_, cx| sync_status_bar(cx)).detach();
+    sync_app_surfaces(cx);
+    cx.observe(store, |_, cx| sync_app_surfaces(cx)).detach();
     // A switch flipped in the pane has to reach the menu bar there and then,
     // rather than at whatever remains of the poll interval.
-    cx.observe(settings, |_, cx| sync_status_bar(cx)).detach();
+    cx.observe(settings, |_, cx| sync_app_surfaces(cx)).detach();
     init_countdown_ticker(cx);
 
     cx.spawn(async move |cx| {
@@ -243,6 +264,15 @@ fn sync_status_bar(cx: &App) {
     let display = SettingsStore::get(cx).menu_bar;
     status_bar::set_title(&status_title(store, &display));
     status_bar::set_menu_bar(menu_limits(store), display);
+}
+
+/// Store and settings changes feed both permanent at-a-glance views. Countdown
+/// ticks call `sync_status_bar` directly because WidgetKit renders its dates.
+fn sync_app_surfaces(cx: &App) {
+    sync_status_bar(cx);
+    let store = UsageStore::global(cx);
+    let display = SettingsStore::get(cx).menu_bar;
+    widget::sync(store.read(cx), &display);
 }
 
 /// The windows shown in the dropdown. Signed out drops them so the menu does
@@ -331,8 +361,8 @@ mod tests {
     // gpui's own `test` attribute, which shadows the built-in one and sends
     // `#[test]` into an expansion loop.
     use super::{
-        MenuBarSettings, QuotaLimits, QuotaWindow, STATUS_LOADING, STATUS_SIGNED_OUT,
-        STATUS_UNKNOWN, UsageStore, status_title,
+        APP_ID, MenuBarSettings, QuotaLimits, QuotaWindow, STATUS_LOADING, STATUS_SIGNED_OUT,
+        STATUS_UNKNOWN, UsageStore, is_app_url, status_title,
     };
     use crate::settings::PercentMode;
     use chrono::Utc;
@@ -375,6 +405,13 @@ mod tests {
     fn the_defaults_still_read_the_way_they_did() {
         let display = MenuBarSettings::default();
         assert_eq!(status_title(&store(), &display), "5h 62% · 7d 41%");
+    }
+
+    #[test]
+    fn only_the_apps_url_scheme_opens_the_window() {
+        assert!(is_app_url(&format!("{APP_ID}://open")));
+        assert!(is_app_url(&format!("{}://open", APP_ID.to_uppercase())));
+        assert!(!is_app_url("https://example.com"));
     }
 
     #[test]

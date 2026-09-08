@@ -2,17 +2,16 @@ use crate::auth::{self, Auth};
 use crate::limits;
 use crate::usage::{self, UsageSnapshot};
 
-pub struct Session {
-    pub logged_in: bool,
-    pub snapshot: Option<UsageSnapshot>,
+pub enum Session {
+    NotInstalled,
+    LoggedOut,
+    LoggedIn(Box<UsageSnapshot>),
 }
 
 pub fn load() -> Result<Session, String> {
     match auth::check()? {
-        Auth::LoggedOut => Ok(Session {
-            logged_in: false,
-            snapshot: None,
-        }),
+        Auth::NotInstalled => Ok(Session::NotInstalled),
+        Auth::LoggedOut => Ok(Session::LoggedOut),
         Auth::LoggedIn => {
             let snapshot = usage::load_usage();
             // The CLI reports logged in from a keychain item that can outlive
@@ -23,15 +22,9 @@ pub fn load() -> Result<Session, String> {
                 .err()
                 .is_some_and(|err| limits::is_unauthorized(err))
             {
-                Ok(Session {
-                    logged_in: false,
-                    snapshot: None,
-                })
+                Ok(Session::LoggedOut)
             } else {
-                Ok(Session {
-                    logged_in: true,
-                    snapshot: Some(snapshot),
-                })
+                Ok(Session::LoggedIn(Box::new(snapshot)))
             }
         }
     }

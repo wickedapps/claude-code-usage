@@ -6,6 +6,7 @@ use crate::limits::{self, QuotaLimits};
 use crate::session::{self, Session};
 use crate::settings::SettingsStore;
 use crate::usage::UsageReport;
+use chrono::{DateTime, Utc};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, Global, SharedString};
 use std::time::Duration;
@@ -25,9 +26,14 @@ const POLL_TICK: Duration = Duration::from_secs(60);
 #[derive(Default)]
 pub struct UsageStore {
     pub loading: bool,
+    pub cli_installed: Option<bool>,
     pub logged_in: Option<bool>,
     pub usage: Option<UsageReport>,
     pub limits: Option<QuotaLimits>,
+    /// When the API last accepted the limits now in `limits`. The widget uses
+    /// this instead of the file-write time, so an unchanged settings write does
+    /// not pretend the quota figures were fetched again.
+    pub limits_updated_at: Option<DateTime<Utc>>,
     pub usage_error: Option<SharedString>,
     pub limits_error: Option<SharedString>,
     pub auth_error: Option<SharedString>,
@@ -105,22 +111,22 @@ impl UsageStore {
 
     fn apply_session(&mut self, result: Result<Session, String>) {
         match result {
-            Ok(session) if !session.logged_in => self.sign_out(),
-            Ok(session) => {
+            Ok(Session::NotInstalled) => self.cli_not_installed(),
+            Ok(Session::LoggedOut) => self.sign_out(),
+            Ok(Session::LoggedIn(snapshot)) => {
+                self.cli_installed = Some(true);
                 self.logged_in = Some(true);
-                if let Some(snapshot) = session.snapshot {
-                    match snapshot.report {
-                        Ok(report) => {
-                            self.usage = Some(report);
-                            self.usage_error = None;
-                        }
-                        Err(err) => {
-                            self.usage = None;
-                            self.usage_error = Some(err.into());
-                        }
+                match snapshot.report {
+                    Ok(report) => {
+                        self.usage = Some(report);
+                        self.usage_error = None;
                     }
-                    self.apply_limits(snapshot.limits);
+                    Err(err) => {
+                        self.usage = None;
+                        self.usage_error = Some(err.into());
+                    }
                 }
+                self.apply_limits(snapshot.limits);
             }
             Err(err) => {
                 self.auth_error = Some(err.into());
@@ -132,6 +138,7 @@ impl UsageStore {
         match result {
             Ok(limits) => {
                 self.limits = Some(limits);
+                self.limits_updated_at = Some(Utc::now());
                 self.limits_error = None;
             }
             Err(err) if limits::is_unauthorized(&err) => self.sign_out(),
@@ -139,15 +146,29 @@ impl UsageStore {
                 // Dropped rather than left stale, so neither the window nor the
                 // menu bar shows a number the API has stopped standing behind.
                 self.limits = None;
+                self.limits_updated_at = None;
                 self.limits_error = Some(err.into());
             }
         }
     }
 
     fn sign_out(&mut self) {
+        self.cli_installed = Some(true);
         self.logged_in = Some(false);
         self.usage = None;
         self.limits = None;
+        self.limits_updated_at = None;
+        self.usage_error = None;
+        self.limits_error = None;
+        self.auth_error = None;
+    }
+
+    fn cli_not_installed(&mut self) {
+        self.cli_installed = Some(false);
+        self.logged_in = None;
+        self.usage = None;
+        self.limits = None;
+        self.limits_updated_at = None;
         self.usage_error = None;
         self.limits_error = None;
         self.auth_error = None;

@@ -4,15 +4,19 @@ use std::process::Command;
 /// A GUI process inherits launchd's PATH, not the user's, so `claude` is only on
 /// PATH once a login shell has sourced their profile.
 pub const LOGIN_SHELL: &str = "/bin/zsh";
+const NOT_INSTALLED_MARKER: &str = "__CLAUDE_CODE_NOT_INSTALLED__";
+const AUTH_COMMAND: &str = "if command -v claude >/dev/null 2>&1; then claude auth status --json; else printf '\\n__CLAUDE_CODE_NOT_INSTALLED__\\n'; fi";
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum Auth {
+    NotInstalled,
     LoggedIn,
     LoggedOut,
 }
 
 pub fn check() -> Result<Auth, String> {
     let output = Command::new(LOGIN_SHELL)
-        .args(["-lc", "claude auth status --json"])
+        .args(["-lc", AUTH_COMMAND])
         .output()
         .map_err(|err| format!("Could not run Claude Code: {err}"))?;
 
@@ -25,8 +29,19 @@ pub fn check() -> Result<Auth, String> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let json = extract_json(&combined).ok_or_else(|| {
-        if combined.trim().is_empty() {
+    parse_auth(&combined)
+}
+
+fn parse_auth(output: &str) -> Result<Auth, String> {
+    if output
+        .lines()
+        .any(|line| line.trim() == NOT_INSTALLED_MARKER)
+    {
+        return Ok(Auth::NotInstalled);
+    }
+
+    let json = extract_json(output).ok_or_else(|| {
+        if output.trim().is_empty() {
             "Claude Code returned no login status".to_string()
         } else {
             "Could not read Claude login status".to_string()
@@ -50,4 +65,33 @@ fn extract_json(text: &str) -> Option<Value> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     serde_json::from_str(&text[start..=end]).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Auth, parse_auth};
+
+    #[test]
+    fn the_missing_cli_marker_gets_its_own_state() {
+        assert_eq!(
+            parse_auth("profile output\n__CLAUDE_CODE_NOT_INSTALLED__"),
+            Ok(Auth::NotInstalled)
+        );
+    }
+
+    #[test]
+    fn valid_status_survives_login_shell_noise() {
+        assert_eq!(
+            parse_auth("profile output\n{\"loggedIn\":true}"),
+            Ok(Auth::LoggedIn)
+        );
+    }
+
+    #[test]
+    fn malformed_cli_output_remains_an_error() {
+        assert_eq!(
+            parse_auth("unexpected output"),
+            Err("Could not read Claude login status".into())
+        );
+    }
 }

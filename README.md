@@ -4,6 +4,8 @@
 
 A macOS menu bar app that shows how much Claude Code you have left. The menu bar reads `5h 62% · 7d 41%`, the percentages left in the 5-hour and weekly windows, and refreshes itself every minute. Opening the menu shows those same remaining percentages with how long until each window resets, and from there you can open the window, force a refresh, or quit.
 
+Team-signed builds also include a small macOS widget for the desktop and Notification Center. It follows the menu dropdown's selected 5-hour and weekly windows and its left/used percentage setting. Reset countdowns keep moving between refreshes, and clicking the widget opens the main window.
+
 The window has the same two limits along the top, plus the Opus weekly window, which does not fit in the menu bar. Under them is a table of input, output, cache, and total tokens per day, week, month, session, and 5-hour block, summed from the JSONL transcripts in `~/.claude/projects`.
 
 The Dock icon follows the window. While the window is up the app is a regular one, with a Dock tile, a Cmd-Tab entry, and its own menu bar. Closing the window parks it as an accessory, leaving the menu bar item as the only thing on screen.
@@ -19,6 +21,7 @@ That token is sent only to `https://api.anthropic.com/api/oauth/usage`. Transcri
 - macOS
 - Rust 1.88 or newer (`rustup`), edition 2024
 - [Claude Code](https://code.claude.com/) installed and on your PATH
+- Full Xcode for widget and release builds
 - Xcode command line tools, with the Metal toolchain if the first build asks for it:
 
 ```sh
@@ -50,6 +53,28 @@ Parking, rather than closing, is deliberate. GPUI leaks a window on teardown: `M
 
 The limits are polled every minute with the window open and every five with it closed. Both intervals are in `src/store.rs`. The user agent, which needs `claude --version` and so a login shell and a Node start, is read once per run rather than once per poll.
 
+## Widget
+
+The widget does not fetch from Anthropic. The menu bar process writes the selected limits to `widget-snapshot.json` in a shared macOS App Group, then asks WidgetKit to reload when a visible value changes. The snapshot contains percentages, reset dates, display preferences, and the last successful fetch time. It contains no OAuth token and no transcript data.
+
+WidgetKit schedules the actual render, so a tile can lag behind the menu bar. It also asks for a fresh snapshot every 30 minutes and renders reset dates as live SwiftUI date text. Keep Claude Code Usage running in the menu bar if you want the widget to receive new quota figures.
+
+The extension needs a real Apple team identity for its App Group. `cargo run` still works without one. An ad-hoc bundle also works, but `scripts/bundle.sh` leaves the widget out and prints a warning rather than shipping a tile that cannot read its data.
+
+The Rust and Swift tests are separate:
+
+```sh
+cargo test
+xcodebuild \
+  -project widget/ClaudeUsageWidget.xcodeproj \
+  -scheme ClaudeUsageWidget \
+  -derivedDataPath target/widget-test \
+  CODE_SIGNING_ALLOWED=NO \
+  HOST_BUNDLE_ID=com.example.claude-usage \
+  APP_GROUP_ID=EXAMPLETEAM.com.example.claude-usage \
+  test
+```
+
 ## Distribution
 
 `scripts/bundle.sh` builds `Claude Code Usage.app`, signs it with your Developer ID, and packs a disk image (plus a zip). Set your own identifiers first:
@@ -63,6 +88,8 @@ Fill in a bundle id you own. `release.env` is ignored by git, and the script rea
 ```sh
 sh scripts/bundle.sh
 ```
+
+The script reads the team id from a normal `Developer ID Application: Name (TEAMID)` identity and uses `<TEAMID>.<BUNDLE_ID>` for the widget's macOS App Group. Set `TEAM_ID` in `release.env` only when `SIGN_IDENTITY` is a certificate hash or another value that does not carry the team id.
 
 To notarize as well, create a notarytool profile once. It stores your app-specific password in your login keychain rather than in the repo:
 
@@ -92,7 +119,7 @@ gh release create "v$V" --title "v$V" --notes "..." \
 
 Bundle before tagging, so what ships is built from the commit the tag names. `xcrun stapler validate target/bundle/claude-usage-$V.dmg` confirms the notarization ticket made it into the disk image before you upload it.
 
-The app is signed with the hardened runtime, which notarization requires, and with no entitlements. It is deliberately not sandboxed: it runs the `claude` CLI through a login shell and reads Claude Code's keychain item, and the sandbox has no entitlement that permits either.
+The app is signed with the hardened runtime, which notarization requires. It stays outside App Sandbox because it runs the `claude` CLI through a login shell and reads Claude Code's keychain item. Widget builds give the host only an App Group entitlement. The extension is sandboxed and can read only that shared group.
 
 ## Icon
 

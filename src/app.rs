@@ -20,6 +20,7 @@ use gpui_component::*;
 /// Remaining percentage at or below which a quota bar turns red, then amber.
 const DANGER_REMAINING: f64 = 10.0;
 const WARNING_REMAINING: f64 = 30.0;
+const CLAUDE_CODE_INSTALL_URL: &str = "https://code.claude.com/docs/en/quickstart";
 
 /// Tab labels, in the order the TabBar renders them. `tab_rows` maps the
 /// selected index back onto the matching field of the report.
@@ -138,6 +139,7 @@ impl AppView {
 struct ViewState {
     loading: bool,
     initial_load: bool,
+    cli_not_installed: bool,
     logged_out: bool,
     has_dashboard: bool,
     has_usage: bool,
@@ -152,6 +154,9 @@ impl From<&UsageStore> for ViewState {
         Self {
             loading: store.loading,
             initial_load: store.is_initial_load(),
+            cli_not_installed: !store.loading
+                && store.cli_installed == Some(false)
+                && store.auth_error.is_none(),
             logged_out: !store.loading
                 && store.logged_in == Some(false)
                 && store.auth_error.is_none(),
@@ -195,6 +200,9 @@ impl Render for AppView {
                     .when(!in_settings, |this| {
                         this.when_some(state.auth_error.clone(), |this, err| {
                             this.child(error_label(err, cx))
+                        })
+                        .when(state.cli_not_installed, |this| {
+                            this.child(cli_not_installed_state(cx))
                         })
                         .when(state.logged_out, |this| this.child(logged_out_state(cx)))
                         .when(state.has_dashboard, |this| {
@@ -561,6 +569,24 @@ fn logged_out_state(cx: &App) -> impl IntoElement {
         .items_center()
         .justify_center()
         .child(Label::new("Not logged in").text_color(cx.theme().muted_foreground))
+}
+
+fn cli_not_installed_state(cx: &App) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .child(
+            Label::new("Claude Code CLI is not installed").text_color(cx.theme().muted_foreground),
+        )
+        .child(
+            Button::new("install-claude-code")
+                .primary()
+                .label("Install Claude Code")
+                .on_click(|_, _, cx| cx.open_url(CLAUDE_CODE_INSTALL_URL)),
+        )
 }
 
 fn error_label(err: SharedString, cx: &App) -> impl IntoElement {

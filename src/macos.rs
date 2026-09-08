@@ -9,7 +9,7 @@ use cocoa::foundation::{NSRect, NSSize, NSString};
 #[cfg(target_os = "macos")]
 use objc::{class, msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 
 /// Size the window's drawables shrink to while it is off screen. A CAMetalLayer
 /// reallocates its buffers whenever this changes, so setting it small is what
@@ -95,6 +95,43 @@ pub fn set_app_icon(png: &[u8]) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_app_icon(_png: &[u8]) {}
+
+/// Resolves the shared container through Foundation rather than guessing its
+/// path under `~/Library/Group Containers`. macOS returns `nil` when this build
+/// has no matching App Group entitlement, which is the normal `cargo run` and
+/// ad-hoc bundle behavior.
+#[cfg(target_os = "macos")]
+pub fn app_group_container(group_id: &str) -> Option<std::path::PathBuf> {
+    unsafe {
+        let manager: id = msg_send![class!(NSFileManager), defaultManager];
+        let group = NSString::alloc(nil).init_str(group_id);
+        let url: id = msg_send![
+            manager,
+            containerURLForSecurityApplicationGroupIdentifier: group
+        ];
+        let _: () = msg_send![group, release];
+        if url == nil {
+            return None;
+        }
+        let path: id = msg_send![url, path];
+        if path == nil {
+            return None;
+        }
+        let utf8: *const std::ffi::c_char = msg_send![path, UTF8String];
+        if utf8.is_null() {
+            return None;
+        }
+        CStr::from_ptr(utf8)
+            .to_str()
+            .ok()
+            .map(std::path::PathBuf::from)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn app_group_container(_group_id: &str) -> Option<std::path::PathBuf> {
+    None
+}
 
 /// Takes the window off screen and gives back what it was holding.
 ///
