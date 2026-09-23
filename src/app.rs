@@ -143,7 +143,6 @@ struct ViewState {
     logged_out: bool,
     has_dashboard: bool,
     has_usage: bool,
-    auth_error: Option<SharedString>,
     usage_error: Option<SharedString>,
     limits_error: Option<SharedString>,
     limits: Option<QuotaLimits>,
@@ -154,15 +153,10 @@ impl From<&UsageStore> for ViewState {
         Self {
             loading: store.loading,
             initial_load: store.is_initial_load(),
-            cli_not_installed: !store.loading
-                && store.cli_installed == Some(false)
-                && store.auth_error.is_none(),
-            logged_out: !store.loading
-                && store.logged_in == Some(false)
-                && store.auth_error.is_none(),
+            cli_not_installed: !store.loading && store.cli_installed == Some(false),
+            logged_out: !store.loading && store.logged_in == Some(false),
             has_dashboard: store.has_dashboard(),
             has_usage: store.usage.is_some(),
-            auth_error: store.auth_error.clone(),
             usage_error: store.usage_error.clone(),
             limits_error: store.limits_error.clone(),
             limits: store.limits.clone(),
@@ -198,10 +192,7 @@ impl Render for AppView {
                         this.child(self.render_settings(&settings, cx))
                     })
                     .when(!in_settings, |this| {
-                        this.when_some(state.auth_error.clone(), |this, err| {
-                            this.child(error_label(err, cx))
-                        })
-                        .when(state.cli_not_installed, |this| {
+                        this.when(state.cli_not_installed, |this| {
                             this.child(cli_not_installed_state(cx))
                         })
                         .when(state.logged_out, |this| this.child(logged_out_state(cx)))
@@ -568,9 +559,16 @@ fn logged_out_state(cx: &App) -> impl IntoElement {
         .w_full()
         .items_center()
         .justify_center()
+        .gap_1()
         .child(Label::new("Not logged in").text_color(cx.theme().muted_foreground))
+        .child(caption(
+            "Run `claude auth login` in Terminal. This picks it up on the next refresh.",
+            cx,
+        ))
 }
 
+/// Only reached with no OAuth token anywhere and no `claude` on the shell's
+/// PATH or in any of the usual install directories. See `cli::locate`.
 fn cli_not_installed_state(cx: &App) -> impl IntoElement {
     v_flex()
         .flex_1()
@@ -579,13 +577,31 @@ fn cli_not_installed_state(cx: &App) -> impl IntoElement {
         .justify_center()
         .gap_3()
         .child(
-            Label::new("Claude Code CLI is not installed").text_color(cx.theme().muted_foreground),
+            v_flex()
+                .items_center()
+                .gap_1()
+                .child(Label::new("Claude Code not found").text_color(cx.theme().muted_foreground))
+                .child(caption(
+                    "Looked on your shell's PATH and in the usual install locations.",
+                    cx,
+                )),
         )
         .child(
-            Button::new("install-claude-code")
-                .primary()
-                .label("Install Claude Code")
-                .on_click(|_, _, cx| cx.open_url(CLAUDE_CODE_INSTALL_URL)),
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("install-claude-code")
+                        .primary()
+                        .label("Install Claude Code")
+                        .on_click(|_, _, cx| cx.open_url(CLAUDE_CODE_INSTALL_URL)),
+                )
+                .child(
+                    Button::new("check-claude-code")
+                        .label("Check again")
+                        .on_click(|_, _, cx| {
+                            UsageStore::global(cx).update(cx, |store, cx| store.reload(cx))
+                        }),
+                ),
         )
 }
 

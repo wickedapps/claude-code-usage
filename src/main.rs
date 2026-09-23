@@ -6,7 +6,7 @@ use std::time::Duration;
 
 mod app;
 mod assets;
-mod auth;
+mod cli;
 mod limits;
 mod login_item;
 mod macos;

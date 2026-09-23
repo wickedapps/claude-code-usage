@@ -12,7 +12,9 @@ The Dock icon follows the window. While the window is up the app is a regular on
 
 Built with [GPUI](https://gpui.rs/) and [gpui-component](https://longbridge.github.io/gpui-component/). Unofficial, and not affiliated with Anthropic.
 
-The limits come from Anthropic's OAuth usage endpoint. The app sends the token Claude Code already keeps in your login keychain, so there is no second login here. If Claude Code is signed out, or that token is rejected, the window says "Not logged in" and drops any numbers it had been showing. `claude auth status` can still report a login after the token is dead, so a 401 from the usage API is what actually ends the session.
+The limits come from Anthropic's OAuth usage endpoint. The app sends the token Claude Code already keeps in your login keychain, so there is no second login here. If there is no token, or the usage API rejects it with a 401, the window says "Not logged in" and drops any numbers it had been showing. The app does not ask `claude auth status`, which can report a login after the token is dead.
+
+The CLI is only looked for when there is no token, to tell "not logged in" apart from "not installed". A Finder-launched app gets launchd's PATH, and `zsh -l` does not read `.zshrc`, which is where the native installer, nvm, bun, pnpm, and mise add their directories. So the app reads PATH once from an interactive login shell (`$SHELL -ilc`), falls back to `launchctl getenv PATH`, and then checks the usual install directories (`~/.local/bin`, `~/.claude/local`, nvm, bun, volta, pnpm, mise, asdf, Homebrew). The lookup is in `src/cli.rs`.
 
 That token is sent only to `https://api.anthropic.com/api/oauth/usage`. Transcripts stay on disk. There is no extra account, no telemetry, and no other server. The endpoint is not a public API, so a Claude Code update can change the shape of the response or stop accepting the request.
 
@@ -20,7 +22,7 @@ That token is sent only to `https://api.anthropic.com/api/oauth/usage`. Transcri
 
 - macOS
 - Rust 1.88 or newer (`rustup`), edition 2024
-- [Claude Code](https://code.claude.com/) installed and on your PATH
+- [Claude Code](https://code.claude.com/), installed any way, and logged in
 - Full Xcode for widget and release builds
 - Xcode command line tools, with the Metal toolchain if the first build asks for it:
 
@@ -51,7 +53,7 @@ Closing the window parks it rather than destroying it, and the app settles at ab
 
 Parking, rather than closing, is deliberate. GPUI leaks a window on teardown: `MetalRenderer::destroy` is a no-op and the layer's three drawables go with it, so every close-and-reopen costs another 28MB that never came back. Four cycles reached 171MB. Keeping the one window and taking it off screen holds that flat. While it is parked its drawables shrink to 1x1, which is what returns the 21.5MB of GPU surfaces, and `AppView` ignores store updates so nothing asks for a frame that will never be shown. A frame requested by a parked window is not free: it costs a CoreAnimation commit and an AppKit display cycle, which on its own was worth 2% CPU.
 
-The limits are polled every minute with the window open and every five with it closed. Both intervals are in `src/store.rs`. The user agent, which needs `claude --version` and so a login shell and a Node start, is read once per run rather than once per poll.
+The limits are polled every minute with the window open and every five with it closed. Both intervals are in `src/store.rs`. The user agent needs `claude --version`, which can cost a shell start and a Node start, so it is read once per run rather than once per poll.
 
 ## Widget
 
@@ -119,7 +121,7 @@ gh release create "v$V" --title "v$V" --notes "..." \
 
 Bundle before tagging, so what ships is built from the commit the tag names. `xcrun stapler validate target/bundle/claude-usage-$V.dmg` confirms the notarization ticket made it into the disk image before you upload it.
 
-The app is signed with the hardened runtime, which notarization requires. It stays outside App Sandbox because it runs the `claude` CLI through a login shell and reads Claude Code's keychain item. Widget builds give the host only an App Group entitlement. The extension is sandboxed and can read only that shared group.
+The app is signed with the hardened runtime, which notarization requires. It stays outside App Sandbox because it runs the user's shell and the `claude` CLI and reads Claude Code's keychain item. Widget builds give the host only an App Group entitlement. The extension is sandboxed and can read only that shared group.
 
 ## Icon
 

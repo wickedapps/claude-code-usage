@@ -1,4 +1,4 @@
-use crate::auth::LOGIN_SHELL;
+use crate::cli;
 use crate::settings::{MenuBarSettings, PercentMode};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
@@ -17,7 +17,8 @@ const CREDENTIAL_FILES: [&str; 2] = [".claude/.credentials.json", ".claude/crede
 /// The usage endpoint is OAuth-only and gated behind this beta header.
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 const REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(15);
-/// Reported when `claude --version` cannot be read. The endpoint rejects
+/// Reported when `claude --version` cannot be read, including when the CLI is
+/// not installed and the token came from elsewhere. The endpoint rejects
 /// requests without a plausible Claude Code user agent, so any recent version
 /// works; this one only needs bumping if the server starts refusing it.
 const FALLBACK_CLI_VERSION: &str = "2.1.80";
@@ -140,7 +141,13 @@ pub fn fetch_quota_limits() -> Result<QuotaLimits, String> {
 /// answering 401, or there being nothing to send, is the session actually
 /// ending; callers should drop cached numbers and show the signed-out state.
 pub fn is_unauthorized(err: &str) -> bool {
-    err == MISSING_TOKEN || err.ends_with("HTTP 401")
+    is_missing_token(err) || err.ends_with("HTTP 401")
+}
+
+/// Nothing to send at all, as opposed to a token the API turned down. Only
+/// this case needs the CLI looked for, to tell signed out from not installed.
+pub fn is_missing_token(err: &str) -> bool {
+    err == MISSING_TOKEN
 }
 
 fn parse_window(raw: RawWindow) -> Option<QuotaWindow> {
@@ -233,30 +240,17 @@ fn agent() -> &'static ureq::Agent {
     AGENT.get_or_init(|| ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build())
 }
 
-/// Reports the installed CLI's version, picking the first whitespace-separated
-/// word that starts with a digit out of `claude --version`.
+/// The installed CLI's version, as the endpoint expects to see it.
 ///
-/// Worked out once and kept: reading it costs a login shell and a Node start,
-/// which is far too much to repeat on every poll. Upgrading Claude Code while
-/// this is running leaves the agent one version behind until the next restart,
-/// and the endpoint only cares that the version is plausible.
+/// Worked out once and kept: reading it can cost a shell start and a Node
+/// start, which is far too much to repeat on every poll. Upgrading Claude Code
+/// while this is running leaves the agent one version behind until the next
+/// restart, and the endpoint only cares that the version is plausible.
 fn claude_user_agent() -> &'static str {
     static USER_AGENT: OnceLock<String> = OnceLock::new();
     USER_AGENT.get_or_init(|| {
-        let version = Command::new(LOGIN_SHELL)
-            .args(["-lc", "claude --version"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|text| {
-                text.split_whitespace()
-                    .find(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
-                    .map(|part| {
-                        part.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '.')
-                            .to_string()
-                    })
-            })
-            .filter(|version| !version.is_empty())
+        let version = cli::locate()
+            .and_then(|binary| cli::version(&binary))
             .unwrap_or_else(|| FALLBACK_CLI_VERSION.into());
         format!("claude-code/{version}")
     })
@@ -348,6 +342,12 @@ mod tests {
         assert!(is_unauthorized("Usage API returned HTTP 401"));
         assert!(!is_unauthorized("Usage API returned HTTP 500"));
         assert!(!is_unauthorized("Usage API: connection reset"));
+    }
+
+    #[test]
+    fn only_a_missing_token_sends_the_app_looking_for_the_cli() {
+        assert!(is_missing_token(MISSING_TOKEN));
+        assert!(!is_missing_token("Usage API returned HTTP 401"));
     }
 
     #[test]

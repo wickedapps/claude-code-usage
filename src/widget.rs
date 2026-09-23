@@ -58,7 +58,7 @@ impl WidgetSnapshot {
         if store.logged_in == Some(false) {
             return Self::without_windows(WidgetState::SignedOut, display.percent);
         }
-        if store.auth_error.is_some() || store.limits_error.is_some() {
+        if store.limits_error.is_some() {
             return Self::without_windows(WidgetState::Unavailable, display.percent);
         }
 
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn a_failed_refresh_replaces_previous_ready_data() {
         let mut store = ready_store();
-        store.auth_error = Some("claude auth failed".into());
+        store.limits_error = Some("Usage API returned HTTP 500".into());
         let snapshot = WidgetSnapshot::from_store(&store, &MenuBarSettings::default());
         assert_eq!(snapshot.state, WidgetState::Unavailable);
         assert!(snapshot.windows.is_empty());

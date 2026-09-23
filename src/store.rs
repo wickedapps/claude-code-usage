@@ -36,7 +36,6 @@ pub struct UsageStore {
     pub limits_updated_at: Option<DateTime<Utc>>,
     pub usage_error: Option<SharedString>,
     pub limits_error: Option<SharedString>,
-    pub auth_error: Option<SharedString>,
     /// Only sets the polling rate. The window keeps its own state. `init` gives
     /// it its real value: the settings can ask for a launch that puts no window
     /// on screen at all, so a default of false is the honest one.
@@ -87,21 +86,21 @@ impl UsageStore {
         self.window_open
     }
 
-    /// Everything: the login check, the transcript scan, and the limits.
+    /// Everything: the limits, the transcript scan, and, without a token, the
+    /// search for the CLI.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
 
         self.loading = true;
-        self.auth_error = None;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async { session::load() }).await;
+            let session = cx.background_spawn(async { session::load() }).await;
             this.update(cx, |this, cx| {
                 this.loading = false;
-                this.apply_session(result);
+                this.apply_session(session);
                 cx.notify();
             })
             .ok();
@@ -109,11 +108,11 @@ impl UsageStore {
         .detach();
     }
 
-    fn apply_session(&mut self, result: Result<Session, String>) {
-        match result {
-            Ok(Session::NotInstalled) => self.cli_not_installed(),
-            Ok(Session::LoggedOut) => self.sign_out(),
-            Ok(Session::LoggedIn(snapshot)) => {
+    fn apply_session(&mut self, session: Session) {
+        match session {
+            Session::NotInstalled => self.cli_not_installed(),
+            Session::LoggedOut => self.sign_out(),
+            Session::LoggedIn(snapshot) => {
                 self.cli_installed = Some(true);
                 self.logged_in = Some(true);
                 match snapshot.report {
@@ -127,9 +126,6 @@ impl UsageStore {
                     }
                 }
                 self.apply_limits(snapshot.limits);
-            }
-            Err(err) => {
-                self.auth_error = Some(err.into());
             }
         }
     }
@@ -160,7 +156,6 @@ impl UsageStore {
         self.limits_updated_at = None;
         self.usage_error = None;
         self.limits_error = None;
-        self.auth_error = None;
     }
 
     fn cli_not_installed(&mut self) {
@@ -171,7 +166,6 @@ impl UsageStore {
         self.limits_updated_at = None;
         self.usage_error = None;
         self.limits_error = None;
-        self.auth_error = None;
     }
 
     /// Keeps the menu bar current. A tick normally fetches only the limits, but
@@ -238,7 +232,7 @@ impl UsageStore {
     /// Only the very first load takes over the window with a spinner. Later
     /// refreshes keep the numbers on screen and spin the header button instead.
     pub fn is_initial_load(&self) -> bool {
-        self.loading && self.logged_in.is_none() && self.auth_error.is_none()
+        self.loading && self.logged_in.is_none() && self.cli_installed.is_none()
     }
 
     /// The tables and quota cards belong to a live session, not leftover
