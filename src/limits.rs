@@ -1,3 +1,4 @@
+use crate::account;
 use crate::cli;
 use crate::settings::{MenuBarSettings, PercentMode};
 use chrono::{DateTime, Duration, Utc};
@@ -12,6 +13,12 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const TOKEN_ENV: &str = "CLAUDE_OAUTH_ACCESS_TOKEN";
 const MISSING_TOKEN: &str = "No Claude OAuth token found. Log in with Claude Code first.";
+/// Claude Code's access tokens last eight hours and only Claude Code refreshes
+/// them, so a stretch without running it leaves an expired token behind a
+/// login that is still good.
+const EXPIRED_TOKEN: &str = "Claude Code's access token has expired.";
+/// Where Claude Code caches the account profile, relative to `$HOME`.
+const PROFILE_FILE: &str = ".claude.json";
 /// Checked in order when the keychain lookup fails, relative to `$HOME`.
 const CREDENTIAL_FILES: [&str; 2] = [".claude/.credentials.json", ".claude/credentials.json"];
 /// The usage endpoint is OAuth-only and gated behind this beta header.
@@ -69,6 +76,12 @@ impl QuotaKind {
 }
 
 impl QuotaLimits {
+    /// The API answered without a single window: a plan with no limits of
+    /// this kind, rather than a failed fetch.
+    pub fn is_empty(&self) -> bool {
+        self.five_hour.is_none() && self.seven_day.is_none() && self.seven_day_opus.is_none()
+    }
+
     /// The windows the menu bar has been asked for, shortest first, skipping any
     /// the API did not report. Shared by the title and the dropdown so the two
     /// always agree on what is being shown.
@@ -108,13 +121,46 @@ struct RawWindow {
     utilization: Option<f64>,
     #[serde(default)]
     resets_at: Option<Value>,
+    #[serde(default)]
+    used_dollars: Option<f64>,
+    #[serde(default)]
+    limit_dollars: Option<f64>,
+}
+
+/// The parts of Claude Code's stored login this app reads.
+struct Credentials {
+    token: String,
+    expires_at: Option<DateTime<Utc>>,
+    subscription_type: Option<String>,
+    rate_limit_tier: Option<String>,
+}
+
+impl Credentials {
+    fn bare(token: String) -> Self {
+        Self {
+            token,
+            expires_at: None,
+            subscription_type: None,
+            rate_limit_tier: None,
+        }
+    }
+
+    fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+    }
 }
 
 pub fn fetch_quota_limits() -> Result<QuotaLimits, String> {
-    let token = load_access_token()?;
+    let credentials = load_credentials()?;
+    // Checked here rather than left to the API, whose 401 would read as signed
+    // out. Claude Code swaps in a new token the next time it runs, and the next
+    // poll picks that up from the keychain.
+    if credentials.is_expired(Utc::now()) {
+        return Err(EXPIRED_TOKEN.into());
+    }
     let response = agent()
         .get(USAGE_URL)
-        .set("Authorization", &format!("Bearer {token}"))
+        .set("Authorization", &format!("Bearer {}", credentials.token))
         .set("anthropic-beta", OAUTH_BETA)
         .set("Accept", "application/json")
         .set("User-Agent", claude_user_agent())
@@ -144,6 +190,34 @@ pub fn is_unauthorized(err: &str) -> bool {
     is_missing_token(err) || err.ends_with("HTTP 401")
 }
 
+/// The token is there but past its expiry. Still logged in: Claude Code
+/// refreshes it on its next run, so this is not the signed-out state.
+pub fn is_expired(err: &str) -> bool {
+    err == EXPIRED_TOKEN
+}
+
+/// The plan named in the stored login, e.g. `Max 20x`. Read whatever the
+/// token's expiry, since the plan does not lapse with it.
+pub fn subscription_plan() -> Option<String> {
+    let credentials = load_credentials().ok()?;
+    account::plan_name(
+        credentials.subscription_type.as_deref(),
+        credentials.rate_limit_tier.as_deref(),
+        seat_tier().as_deref(),
+    )
+}
+
+/// Team and Enterprise seats are only named in the profile Claude Code caches.
+fn seat_tier() -> Option<String> {
+    let text = std::fs::read_to_string(home_join(PROFILE_FILE)?).ok()?;
+    let value = serde_json::from_str::<Value>(&text).ok()?;
+    value
+        .get("oauthAccount")?
+        .get("seatTier")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Nothing to send at all, as opposed to a token the API turned down. Only
 /// this case needs the CLI looked for, to tell signed out from not installed.
 pub fn is_missing_token(err: &str) -> bool {
@@ -151,7 +225,14 @@ pub fn is_missing_token(err: &str) -> bool {
 }
 
 fn parse_window(raw: RawWindow) -> Option<QuotaWindow> {
-    let used = raw.utilization?;
+    // Each window also carries dollar figures. Where only those are filled in,
+    // the share of the limit spent is the same number utilization would be.
+    let used = raw
+        .utilization
+        .or_else(|| match (raw.used_dollars, raw.limit_dollars) {
+            (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * FULL_PERCENT),
+            _ => None,
+        })?;
     Some(QuotaWindow {
         used,
         remaining: (FULL_PERCENT - used).clamp(0.0, FULL_PERCENT),
@@ -176,31 +257,31 @@ fn parse_reset(value: &Value) -> Option<DateTime<Utc>> {
 
 /// Claude Code keeps the token in the login keychain on macOS and in a JSON file
 /// elsewhere, and either can be overridden by the environment.
-fn load_access_token() -> Result<String, String> {
+fn load_credentials() -> Result<Credentials, String> {
     if let Ok(token) = std::env::var(TOKEN_ENV) {
         let token = token.trim().to_string();
         if !token.is_empty() {
-            return Ok(token);
+            return Ok(Credentials::bare(token));
         }
     }
 
-    if let Some(token) = token_from_keychain() {
-        return Ok(token);
+    if let Some(credentials) = credentials_from_keychain() {
+        return Ok(credentials);
     }
 
     for path in CREDENTIAL_FILES.iter().filter_map(|file| home_join(file)) {
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(value) = serde_json::from_str::<Value>(&text)
-            && let Some(token) = token_from_json(&value)
+            && let Some(credentials) = credentials_from_json(&value)
         {
-            return Ok(token);
+            return Ok(credentials);
         }
     }
 
     Err(MISSING_TOKEN.into())
 }
 
-fn token_from_keychain() -> Option<String> {
+fn credentials_from_keychain() -> Option<Credentials> {
     let output = Command::new("security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
         .output()
@@ -210,12 +291,12 @@ fn token_from_keychain() -> Option<String> {
     }
     let raw = String::from_utf8(output.stdout).ok()?;
     let value = serde_json::from_str::<Value>(raw.trim()).ok()?;
-    token_from_json(&value)
+    credentials_from_json(&value)
 }
 
 /// The key has moved between Claude Code versions, so try each nesting and then
-/// the top level.
-fn token_from_json(value: &Value) -> Option<String> {
+/// the top level. The expiry and plan are read from whichever one holds the token.
+fn credentials_from_json(value: &Value) -> Option<Credentials> {
     let candidates = [
         value.get("claudeAiOauth"),
         value.get("claude_ai_oauth"),
@@ -223,12 +304,29 @@ fn token_from_json(value: &Value) -> Option<String> {
         Some(value),
     ];
     for candidate in candidates.into_iter().flatten() {
-        if let Some(token) = candidate.get("accessToken").and_then(Value::as_str) {
-            let token = token.trim();
-            if !token.is_empty() {
-                return Some(token.to_string());
-            }
+        let Some(token) = candidate.get("accessToken").and_then(Value::as_str) else {
+            continue;
+        };
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
         }
+        let text = |key: &str| {
+            candidate
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        return Some(Credentials {
+            token: token.to_string(),
+            // Epoch milliseconds.
+            expires_at: candidate
+                .get("expiresAt")
+                .and_then(Value::as_i64)
+                .and_then(DateTime::from_timestamp_millis),
+            subscription_type: text("subscriptionType"),
+            rate_limit_tier: text("rateLimitTier"),
+        });
     }
     None
 }
@@ -342,6 +440,60 @@ mod tests {
         assert!(is_unauthorized("Usage API returned HTTP 401"));
         assert!(!is_unauthorized("Usage API returned HTTP 500"));
         assert!(!is_unauthorized("Usage API: connection reset"));
+    }
+
+    #[test]
+    fn an_expired_token_is_not_a_signed_out_one() {
+        assert!(is_expired(EXPIRED_TOKEN));
+        assert!(!is_unauthorized(EXPIRED_TOKEN));
+        assert!(!is_missing_token(EXPIRED_TOKEN));
+    }
+
+    #[test]
+    fn the_stored_login_carries_its_expiry_and_plan() {
+        let value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": " token ",
+                "expiresAt": 1_790_153_332_424_i64,
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_20x"
+            }
+        });
+        let credentials = credentials_from_json(&value).unwrap();
+        assert_eq!(credentials.token, "token");
+        assert_eq!(credentials.subscription_type.as_deref(), Some("max"));
+        assert_eq!(
+            credentials.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
+        let expires_at = credentials.expires_at.unwrap();
+        assert_eq!(expires_at.timestamp_millis(), 1_790_153_332_424);
+        assert!(credentials.is_expired(expires_at));
+        assert!(!credentials.is_expired(expires_at - Duration::seconds(1)));
+    }
+
+    #[test]
+    fn a_token_with_no_expiry_is_never_called_expired() {
+        let value = serde_json::json!({ "accessToken": "token" });
+        let credentials = credentials_from_json(&value).unwrap();
+        assert!(!credentials.is_expired(Utc::now()));
+    }
+
+    #[test]
+    fn a_window_reported_only_in_dollars_still_has_a_figure() {
+        let raw: RawWindow = serde_json::from_value(serde_json::json!({
+            "utilization": null, "used_dollars": 25.0, "limit_dollars": 100.0, "resets_at": null
+        }))
+        .unwrap();
+        let window = parse_window(raw).unwrap();
+        assert_eq!(window.used, 25.0);
+        assert_eq!(window.remaining, 75.0);
+
+        let raw: RawWindow = serde_json::from_value(serde_json::json!({
+            "utilization": null, "used_dollars": null, "limit_dollars": null
+        }))
+        .unwrap();
+        assert!(parse_window(raw).is_none());
     }
 
     #[test]

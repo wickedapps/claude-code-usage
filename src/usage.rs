@@ -176,7 +176,7 @@ pub struct UsageSnapshot {
     pub limits: Result<QuotaLimits, String>,
 }
 
-fn load_transcripts() -> Result<UsageReport, String> {
+pub fn load_transcripts() -> Result<UsageReport, String> {
     let files = usage_files();
     if files.is_empty() {
         return Err(

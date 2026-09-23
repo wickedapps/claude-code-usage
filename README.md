@@ -12,9 +12,15 @@ The Dock icon follows the window. While the window is up the app is a regular on
 
 Built with [GPUI](https://gpui.rs/) and [gpui-component](https://longbridge.github.io/gpui-component/). Unofficial, and not affiliated with Anthropic.
 
-The limits come from Anthropic's OAuth usage endpoint. The app sends the token Claude Code already keeps in your login keychain, so there is no second login here. If there is no token, or the usage API rejects it with a 401, the window says "Not logged in" and drops any numbers it had been showing. The app does not ask `claude auth status`, which can report a login after the token is dead.
+The limits come from Anthropic's OAuth usage endpoint. The app sends the token Claude Code already keeps in your login keychain, so there is no second login here. If there is no token, or the usage API rejects it with a 401, the window says "Not logged in" and drops any numbers it had been showing. Whether you are logged in is decided by the token, not by `claude auth status`, which can report a login after the token is dead.
 
-The CLI is only looked for when there is no token, to tell "not logged in" apart from "not installed". A Finder-launched app gets launchd's PATH, and `zsh -l` does not read `.zshrc`, which is where the native installer, nvm, bun, pnpm, and mise add their directories. So the app reads PATH once from an interactive login shell (`$SHELL -ilc`), falls back to `launchctl getenv PATH`, and then checks the usual install directories (`~/.local/bin`, `~/.claude/local`, nvm, bun, volta, pnpm, mise, asdf, Homebrew). The lookup is in `src/cli.rs`.
+Claude Code's access tokens last eight hours, and only Claude Code refreshes them. When the stored token is past its `expiresAt`, the app skips the request and says the session has expired rather than that you are logged out. The token tables stay up, and the limits come back on the first poll after Claude Code has run and stored a fresh token. The app never refreshes the token itself.
+
+The header names your plan (`Max 20x plan`, `Team Standard plan`), read from the `subscriptionType` and `rateLimitTier` stored with the token, plus the seat tier in `~/.claude.json` for Team and Enterprise.
+
+The 5-hour and weekly limits belong to a subscription. If Claude Code is billed per token instead, through an API key, an `ANTHROPIC_AUTH_TOKEN` gateway, or Bedrock, Vertex, or Foundry, there are no limits to show. The app asks `claude auth status --json` how Claude Code is being billed, because an API key in the environment outranks a claude.ai login that is still in the keychain. In that case the window shows the token tables without limit cards, and the menu bar reads `Claude: API billing`. A plan that reports no windows at all reads `Claude: no limits`.
+
+A Finder-launched app gets launchd's PATH, and `zsh -l` does not read `.zshrc`, which is where the native installer, nvm, bun, pnpm, and mise add their directories. So the app reads PATH once from an interactive login shell (`$SHELL -ilc`), falls back to `launchctl getenv PATH`, and then checks the usual install directories (`~/.local/bin`, `~/.claude/local`, nvm, bun, volta, pnpm, mise, asdf, Homebrew). The same shell read also picks up the variables that decide how Claude Code authenticates (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`/`_FOUNDRY`, `CLAUDE_CONFIG_DIR`). They are passed only to `claude auth status`, so its answer matches what a terminal would get. The lookup is in `src/cli.rs`.
 
 That token is sent only to `https://api.anthropic.com/api/oauth/usage`. Transcripts stay on disk. There is no extra account, no telemetry, and no other server. The endpoint is not a public API, so a Claude Code update can change the shape of the response or stop accepting the request.
 
@@ -53,7 +59,7 @@ Closing the window parks it rather than destroying it, and the app settles at ab
 
 Parking, rather than closing, is deliberate. GPUI leaks a window on teardown: `MetalRenderer::destroy` is a no-op and the layer's three drawables go with it, so every close-and-reopen costs another 28MB that never came back. Four cycles reached 171MB. Keeping the one window and taking it off screen holds that flat. While it is parked its drawables shrink to 1x1, which is what returns the 21.5MB of GPU surfaces, and `AppView` ignores store updates so nothing asks for a frame that will never be shown. A frame requested by a parked window is not free: it costs a CoreAnimation commit and an AppKit display cycle, which on its own was worth 2% CPU.
 
-The limits are polled every minute with the window open and every five with it closed. Both intervals are in `src/store.rs`. The user agent needs `claude --version`, which can cost a shell start and a Node start, so it is read once per run rather than once per poll.
+The limits are polled every minute with the window open and every five with it closed. Both intervals are in `src/store.rs`. The user agent needs `claude --version`, which can cost a shell start and a Node start, so it is read once per run rather than once per poll. When Claude Code is billed per token there is nothing to poll, so each tick only reruns `claude auth status`, which takes about a tenth of a second, and does a full reload once billing has switched back to a subscription.
 
 ## Widget
 

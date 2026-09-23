@@ -7,6 +7,9 @@ enum WidgetSnapshotState: String, Decodable, Equatable {
   case loading
   case ready
   case signedOut = "signed_out"
+  case expired
+  case apiBilling = "api_billing"
+  case noLimits = "no_limits"
   case unavailable
 }
 

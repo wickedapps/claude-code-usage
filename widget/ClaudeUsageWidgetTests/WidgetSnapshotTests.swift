@@ -31,7 +31,7 @@ final class WidgetSnapshotTests: XCTestCase {
   }
 
   func testAllSnapshotStatesDecode() throws {
-    for state in ["loading", "signed_out", "unavailable"] {
+    for state in ["loading", "signed_out", "expired", "api_billing", "no_limits", "unavailable"] {
       let json = """
         {"schema_version":1,"state":"\(state)","updated_at":null,"percent_mode":"used","windows":[]}
         """

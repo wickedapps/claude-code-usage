@@ -2,6 +2,7 @@
 //! app global rather than window state because the menu bar has to keep
 //! reporting while the window is closed.
 
+use crate::account::Account;
 use crate::limits::{self, QuotaLimits};
 use crate::session::{self, Session};
 use crate::settings::SettingsStore;
@@ -28,6 +29,12 @@ pub struct UsageStore {
     pub loading: bool,
     pub cli_installed: Option<bool>,
     pub logged_in: Option<bool>,
+    /// How Claude Code is paid for, as of the last full load. `None` until one
+    /// lands, and whenever there is no session to describe.
+    pub account: Option<Account>,
+    /// The stored token is past its expiry. Still logged in, with the limits
+    /// held back until Claude Code runs and swaps in a fresh one.
+    pub token_expired: bool,
     pub usage: Option<UsageReport>,
     pub limits: Option<QuotaLimits>,
     /// When the API last accepted the limits now in `limits`. The widget uses
@@ -51,6 +58,9 @@ impl Global for GlobalUsageStore {}
 enum Tick {
     Skip,
     Limits,
+    /// Billed per token: there are no limits to fetch, only a switch back to
+    /// the subscription to watch for.
+    Account,
     Full,
 }
 
@@ -112,20 +122,35 @@ impl UsageStore {
         match session {
             Session::NotInstalled => self.cli_not_installed(),
             Session::LoggedOut => self.sign_out(),
-            Session::LoggedIn(snapshot) => {
+            Session::LoggedIn { plan, snapshot } => {
                 self.cli_installed = Some(true);
                 self.logged_in = Some(true);
-                match snapshot.report {
-                    Ok(report) => {
-                        self.usage = Some(report);
-                        self.usage_error = None;
-                    }
-                    Err(err) => {
-                        self.usage = None;
-                        self.usage_error = Some(err.into());
-                    }
-                }
+                self.account = Some(Account::Subscription { plan });
+                self.apply_report(snapshot.report);
                 self.apply_limits(snapshot.limits);
+            }
+            Session::Api { billing, report } => {
+                self.cli_installed = Some(true);
+                self.logged_in = Some(true);
+                self.account = Some(Account::Api(billing));
+                self.token_expired = false;
+                self.limits = None;
+                self.limits_updated_at = None;
+                self.limits_error = None;
+                self.apply_report(report);
+            }
+        }
+    }
+
+    fn apply_report(&mut self, report: Result<UsageReport, String>) {
+        match report {
+            Ok(report) => {
+                self.usage = Some(report);
+                self.usage_error = None;
+            }
+            Err(err) => {
+                self.usage = None;
+                self.usage_error = Some(err.into());
             }
         }
     }
@@ -136,9 +161,19 @@ impl UsageStore {
                 self.limits = Some(limits);
                 self.limits_updated_at = Some(Utc::now());
                 self.limits_error = None;
+                self.token_expired = false;
             }
             Err(err) if limits::is_unauthorized(&err) => self.sign_out(),
+            // Not an error to show in red: nothing is wrong that running Claude
+            // Code will not fix, and the window says as much.
+            Err(err) if limits::is_expired(&err) => {
+                self.limits = None;
+                self.limits_updated_at = None;
+                self.limits_error = None;
+                self.token_expired = true;
+            }
             Err(err) => {
+                self.token_expired = false;
                 // Dropped rather than left stale, so neither the window nor the
                 // menu bar shows a number the API has stopped standing behind.
                 self.limits = None;
@@ -151,6 +186,8 @@ impl UsageStore {
     fn sign_out(&mut self) {
         self.cli_installed = Some(true);
         self.logged_in = Some(false);
+        self.account = None;
+        self.token_expired = false;
         self.usage = None;
         self.limits = None;
         self.limits_updated_at = None;
@@ -161,6 +198,8 @@ impl UsageStore {
     fn cli_not_installed(&mut self) {
         self.cli_installed = Some(false);
         self.logged_in = None;
+        self.account = None;
+        self.token_expired = false;
         self.usage = None;
         self.limits = None;
         self.limits_updated_at = None;
@@ -170,7 +209,8 @@ impl UsageStore {
 
     /// Keeps the menu bar current. A tick normally fetches only the limits, but
     /// falls back to a full load while signed out so that logging in elsewhere
-    /// is picked up without touching the app.
+    /// is picked up without touching the app. Billed per token, it only asks
+    /// whether that is still so, and reloads once it is not.
     fn poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let mut waited = Duration::ZERO;
@@ -196,6 +236,8 @@ impl UsageStore {
                 let tick = this.update(cx, |this, _| {
                     if this.loading {
                         Tick::Skip
+                    } else if matches!(this.account, Some(Account::Api(_))) {
+                        Tick::Account
                     } else if this.logged_in == Some(true) {
                         Tick::Limits
                     } else {
@@ -208,6 +250,17 @@ impl UsageStore {
                     Tick::Skip => {}
                     Tick::Full => {
                         if this.update(cx, |this, cx| this.reload(cx)).is_err() {
+                            return;
+                        }
+                    }
+                    Tick::Account => {
+                        let billing = cx.background_spawn(async { session::api_billing() }).await;
+                        let reloaded = this.update(cx, |this, cx| {
+                            if this.account != billing.map(Account::Api) {
+                                this.reload(cx);
+                            }
+                        });
+                        if reloaded.is_err() {
                             return;
                         }
                     }

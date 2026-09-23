@@ -2,6 +2,7 @@
 //! WidgetKit renders in another process, so the extension reads a small JSON
 //! snapshot from their shared App Group instead of touching GPUI or the token.
 
+use crate::account::Account;
 use crate::limits::QuotaKind;
 use crate::settings::{MenuBarSettings, PercentMode};
 use crate::store::UsageStore;
@@ -35,6 +36,12 @@ enum WidgetState {
     Loading,
     Ready,
     SignedOut,
+    /// Logged in, waiting on Claude Code to refresh its token.
+    Expired,
+    /// Billed per token, with no plan limits to show.
+    ApiBilling,
+    /// The plan reported no windows at all.
+    NoLimits,
     Unavailable,
 }
 
@@ -58,6 +65,12 @@ impl WidgetSnapshot {
         if store.logged_in == Some(false) {
             return Self::without_windows(WidgetState::SignedOut, display.percent);
         }
+        if matches!(store.account, Some(Account::Api(_))) {
+            return Self::without_windows(WidgetState::ApiBilling, display.percent);
+        }
+        if store.token_expired {
+            return Self::without_windows(WidgetState::Expired, display.percent);
+        }
         if store.limits_error.is_some() {
             return Self::without_windows(WidgetState::Unavailable, display.percent);
         }
@@ -70,6 +83,9 @@ impl WidgetSnapshot {
             };
             return Self::without_windows(state, display.percent);
         };
+        if limits.is_empty() {
+            return Self::without_windows(WidgetState::NoLimits, display.percent);
+        }
 
         let windows = limits
             .shown(display)
@@ -308,6 +324,34 @@ mod tests {
         assert_eq!(
             WidgetSnapshot::from_store(&store, &display).state,
             WidgetState::SignedOut
+        );
+    }
+
+    #[test]
+    fn states_without_plan_limits_are_their_own() {
+        let display = MenuBarSettings::default();
+        let mut store = ready_store();
+        store.token_expired = true;
+        store.limits = None;
+        assert_eq!(
+            WidgetSnapshot::from_store(&store, &display).state,
+            WidgetState::Expired
+        );
+
+        store.token_expired = false;
+        store.account = Some(Account::Api(crate::account::ApiBilling::Bedrock));
+        assert_eq!(
+            WidgetSnapshot::from_store(&store, &display).state,
+            WidgetState::ApiBilling
+        );
+
+        let mut store = ready_store();
+        store.limits = Some(QuotaLimits::default());
+        let snapshot = WidgetSnapshot::from_store(&store, &display);
+        assert_eq!(snapshot.state, WidgetState::NoLimits);
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap()["state"],
+            "no_limits"
         );
     }
 

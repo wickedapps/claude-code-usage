@@ -4,6 +4,7 @@ use gpui::*;
 use gpui_component::*;
 use std::time::Duration;
 
+mod account;
 mod app;
 mod assets;
 mod cli;
@@ -17,6 +18,7 @@ mod store;
 mod usage;
 mod widget;
 
+use account::Account;
 use app::AppView;
 use assets::Assets;
 use limits::{QuotaKind, QuotaLimits, QuotaWindow};
@@ -40,6 +42,12 @@ const STATUS_LOADING: &str = "Claude…";
 /// because nothing has been loaded yet.
 const STATUS_UNKNOWN: &str = "Claude —";
 const STATUS_SIGNED_OUT: &str = "Claude: signed out";
+/// Billed per token, where there are no plan limits to count down.
+const STATUS_API: &str = "Claude: API billing";
+/// Logged in, but the token needs Claude Code to run and refresh it.
+const STATUS_EXPIRED: &str = "Claude: session expired";
+/// The API answered with no windows at all for this plan.
+const STATUS_NO_LIMITS: &str = "Claude: no limits";
 const STATUS_SEPARATOR: &str = " · ";
 /// How often the menu bar title is rewritten so a reset countdown stays true.
 /// The poll can be a quarter of an hour apart, which would leave `2h41m` on
@@ -292,6 +300,12 @@ fn status_title(store: &UsageStore, display: &MenuBarSettings) -> String {
     if store.logged_in == Some(false) {
         return STATUS_SIGNED_OUT.into();
     }
+    if matches!(store.account, Some(Account::Api(_))) {
+        return STATUS_API.into();
+    }
+    if store.token_expired {
+        return STATUS_EXPIRED.into();
+    }
 
     let Some(limits) = store.limits.as_ref() else {
         return if store.loading {
@@ -300,6 +314,9 @@ fn status_title(store: &UsageStore, display: &MenuBarSettings) -> String {
             STATUS_UNKNOWN.into()
         };
     };
+    if limits.is_empty() {
+        return STATUS_NO_LIMITS.into();
+    }
 
     let parts: Vec<String> = limits
         .shown(display)
@@ -361,9 +378,11 @@ mod tests {
     // gpui's own `test` attribute, which shadows the built-in one and sends
     // `#[test]` into an expansion loop.
     use super::{
-        APP_ID, MenuBarSettings, QuotaLimits, QuotaWindow, STATUS_LOADING, STATUS_SIGNED_OUT,
-        STATUS_UNKNOWN, UsageStore, is_app_url, status_title,
+        APP_ID, Account, MenuBarSettings, QuotaLimits, QuotaWindow, STATUS_API, STATUS_EXPIRED,
+        STATUS_LOADING, STATUS_NO_LIMITS, STATUS_SIGNED_OUT, STATUS_UNKNOWN, UsageStore,
+        is_app_url, status_title,
     };
+    use crate::account::ApiBilling;
     use crate::settings::PercentMode;
     use chrono::Utc;
 
@@ -506,5 +525,44 @@ mod tests {
 
         let failed = UsageStore::default();
         assert_eq!(status_title(&failed, &display), STATUS_UNKNOWN);
+    }
+
+    #[test]
+    fn api_billing_has_no_limits_to_show() {
+        let store = store_with(|store| {
+            store.logged_in = Some(true);
+            store.account = Some(Account::Api(ApiBilling::ApiKey));
+        });
+        assert_eq!(
+            status_title(&store, &MenuBarSettings::default()),
+            STATUS_API
+        );
+    }
+
+    #[test]
+    fn an_expired_token_is_not_signed_out() {
+        let store = store_with(|store| {
+            store.logged_in = Some(true);
+            store.account = Some(Account::Subscription { plan: None });
+            store.token_expired = true;
+        });
+        assert_eq!(
+            status_title(&store, &MenuBarSettings::default()),
+            STATUS_EXPIRED
+        );
+    }
+
+    /// Different from a hand-edited settings file asking for no windows: here
+    /// the API itself reported none.
+    #[test]
+    fn a_plan_with_no_windows_says_so() {
+        let store = store_with(|store| {
+            store.logged_in = Some(true);
+            store.limits = Some(QuotaLimits::default());
+        });
+        assert_eq!(
+            status_title(&store, &MenuBarSettings::default()),
+            STATUS_NO_LIMITS
+        );
     }
 }

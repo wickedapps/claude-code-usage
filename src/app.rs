@@ -1,3 +1,4 @@
+use crate::account::Account;
 use crate::limits::{QuotaKind, QuotaLimits, QuotaWindow};
 use crate::login_item::{self, LoginItemStatus};
 use crate::settings::{PercentMode, RefreshRate, Settings, SettingsStore};
@@ -146,6 +147,8 @@ struct ViewState {
     usage_error: Option<SharedString>,
     limits_error: Option<SharedString>,
     limits: Option<QuotaLimits>,
+    account: Option<Account>,
+    token_expired: bool,
 }
 
 impl From<&UsageStore> for ViewState {
@@ -160,6 +163,12 @@ impl From<&UsageStore> for ViewState {
             usage_error: store.usage_error.clone(),
             limits_error: store.limits_error.clone(),
             limits: store.limits.clone(),
+            // A signed-out session has no account to name.
+            account: store
+                .has_dashboard()
+                .then(|| store.account.clone())
+                .flatten(),
+            token_expired: store.token_expired,
         }
     }
 }
@@ -186,7 +195,12 @@ impl Render for AppView {
                         this.child(loading_state(cx))
                     })
                     .when(!state.initial_load || in_settings, |this| {
-                        this.child(self.render_header(in_settings, state.loading, cx))
+                        this.child(self.render_header(
+                            in_settings,
+                            state.loading,
+                            state.account.as_ref().and_then(Account::label),
+                            cx,
+                        ))
                     })
                     .when(in_settings, |this| {
                         this.child(self.render_settings(&settings, cx))
@@ -209,6 +223,7 @@ impl AppView {
         &self,
         in_settings: bool,
         loading: bool,
+        account: Option<String>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
@@ -233,7 +248,15 @@ impl AppView {
                         "Settings"
                     } else {
                         "Claude Code Usage"
-                    })),
+                    }))
+                    .when_some(account.filter(|_| !in_settings), |this, account| {
+                        this.child(
+                            Label::new(account)
+                                .ml_2()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    }),
             )
             // Nothing on the settings pane is worth a refresh.
             .when(!in_settings, |this| {
@@ -277,6 +300,9 @@ impl AppView {
             })
             .when_some(state.limits_error.clone(), |this, err| {
                 this.child(error_label(err, cx))
+            })
+            .when_some(dashboard_notice(state), |this, text| {
+                this.child(notice(text, cx))
             })
             .when_some(state.limits.clone(), |this, limits| {
                 this.child(render_quota_limits(&limits, percent, cx))
@@ -603,6 +629,45 @@ fn cli_not_installed_state(cx: &App) -> impl IntoElement {
                         }),
                 ),
         )
+}
+
+/// Why there are no quota cards, when that is not a failure: nothing here is
+/// wrong, so it is set in the muted colour rather than as an error.
+fn dashboard_notice(state: &ViewState) -> Option<SharedString> {
+    if let Some(Account::Api(billing)) = &state.account {
+        return Some(
+            format!(
+                "Claude Code is billed per token through {}, so there are no 5-hour or \
+                 weekly limits to track. The token counts below come from your local \
+                 transcripts.",
+                billing.phrase()
+            )
+            .into(),
+        );
+    }
+    if state.token_expired {
+        return Some(
+            "Claude Code's access token has expired. You're still logged in: open Claude \
+             Code to refresh it, and the limits return on the next refresh."
+                .into(),
+        );
+    }
+    if state.limits.as_ref().is_some_and(QuotaLimits::is_empty) {
+        return Some("Your plan did not report any usage limits.".into());
+    }
+    None
+}
+
+fn notice(text: SharedString, cx: &App) -> impl IntoElement {
+    div()
+        .w_full()
+        .p_3()
+        .border_1()
+        .border_color(cx.theme().border)
+        .rounded(cx.theme().radius)
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
 }
 
 fn error_label(err: SharedString, cx: &App) -> impl IntoElement {

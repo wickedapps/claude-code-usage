@@ -116,6 +116,12 @@ struct ClaudeUsageWidgetView: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     case .signedOut:
       status("Sign in to Claude Code", detail: "Then open this app to refresh.")
+    case .expired:
+      status("Session expired", detail: "Open Claude Code to refresh it.")
+    case .apiBilling:
+      status("No plan limits", detail: "Claude Code is billed per token.")
+    case .noLimits:
+      status("No usage limits", detail: "Your plan reports none.")
     case .unavailable:
       status("Usage unavailable", detail: "Open the app to try again.")
     case .ready where snapshot.windows.isEmpty:
