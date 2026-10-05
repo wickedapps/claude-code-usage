@@ -4,6 +4,10 @@
 
 A macOS menu bar app that shows how much Claude Code you have left. The menu bar reads `5h 62% · 7d 41%`, the percentages left in the 5-hour and weekly windows, and refreshes at the configured interval. Opening the menu shows those same remaining percentages with how long until each window resets, and from there you can open the window, force a refresh, or quit.
 
+![The Tokens page in light mode, showing 703M tokens over 30 days with a daily chart and a breakdown by model](assets/tokens-light.png)
+
+![The Limits page in light mode, showing 62% left in the 5-hour window and 41% left in the weekly window](assets/limits-light.png)
+
 Team-signed builds also include a small macOS widget for the desktop and Notification Center. It follows the menu dropdown's selected 5-hour and weekly windows and its left/used percentage setting. Reset countdowns keep moving between refreshes, and clicking the widget opens the main window.
 
 The unified toolbar switches between Limits and Tokens. Limits shows the 5-hour and weekly subscription windows, how long until each resets, and whether the current pace runs out before then. Tokens shows totals, a chart, and breakdowns by model, day, and project, summed from the JSONL transcripts in `~/.claude/projects`. Choose Past 24h, 7 days, 30 days, or 90 days in the toolbar. The range picker is disabled on Limits.
