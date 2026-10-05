@@ -4,3 +4,6 @@
 *~
 *.swp
 .idea/
+/native/.build/
+/native/.swiftpm/
+/artifacts/
