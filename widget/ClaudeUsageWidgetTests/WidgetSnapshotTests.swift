@@ -10,7 +10,7 @@ final class WidgetSnapshotTests: XCTestCase {
       contentsOf: source.appendingPathComponent("Fixtures/ready.json"), encoding: .utf8)
   }
 
-  func testDecodesTheRustContract() throws {
+  func testDecodesTheHostContract() throws {
     let load = WidgetSnapshotLoad.decode(Data(readyJSON.utf8))
     guard case .snapshot(let snapshot) = load else {
       return XCTFail("ready fixture did not decode")
