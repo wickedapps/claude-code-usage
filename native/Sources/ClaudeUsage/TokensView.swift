@@ -4,6 +4,9 @@ import ClaudeUsageCore
 struct TokensView: View {
     @ObservedObject var store: UsageStore
     @State private var data: TokenPageData?
+    @State private var detailSelection: TokenDetailSelection?
+    @State private var detail: TokenDetailData?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ScrollView {
@@ -23,7 +26,9 @@ struct TokensView: View {
                     }
                     TokenTotals(totals: data.summary.totals)
                     TokenTypeBar(totals: data.summary.totals)
-                    TokenUsageBreakdown(summary: data.summary, palette: data.palette)
+                    TokenUsageBreakdown(summary: data.summary, palette: data.palette) { kind, row in
+                        showDetail(TokenDetailSelection(kind: kind, id: row.id))
+                    }
                 }
                 .frame(maxWidth: 1_100, alignment: .leading)
                 .padding(.horizontal, 32)
@@ -44,6 +49,22 @@ struct TokensView: View {
                 .padding(32)
             }
         }
+        .blur(radius: detail == nil ? 0 : 8)
+        .accessibilityHidden(detail != nil)
+        .overlay {
+            if let detail {
+                ZStack {
+                    Color(nsColor: .textBackgroundColor).opacity(0.55)
+                        .contentShape(Rectangle())
+                        .onTapGesture { showDetail(nil) }
+                        .accessibilityHidden(true)
+                    TokenDetailCard(detail: detail) { showDetail(nil) }
+                        .padding(32)
+                }
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: detailSelection)
         .onAppear(perform: updateSummary)
         .onChange(of: store.report) { _ in updateSummary() }
         .onChange(of: store.range) { _ in updateSummary() }
@@ -51,6 +72,23 @@ struct TokensView: View {
 
     private func updateSummary() {
         data = store.report.map { TokenPageData(summary: $0.summary(store.range), samples: $0.samples) }
+        updateDetail()
+    }
+
+    private func showDetail(_ selection: TokenDetailSelection?) {
+        detailSelection = selection
+        updateDetail()
+    }
+
+    /// Follows refreshes and range changes; closes when the row drops out of the range.
+    private func updateDetail() {
+        guard let selection = detailSelection, let report = store.report, let data,
+              let next = TokenDetailData(selection, report: report, parent: data) else {
+            detailSelection = nil
+            detail = nil
+            return
+        }
+        detail = next
     }
 
     private var emptyMessage: String {
@@ -76,9 +114,11 @@ struct TokenPageData {
     let models: [TokenOverviewModel]
     let chartSeries: [TokenModelSeries]
 
-    init(summary: UsageSummary, samples: [UsageSample]) {
+    /// `palette` defaults to one built from `samples`. A detail passes the page's
+    /// palette with its own narrowed samples, so models keep their colors.
+    init(summary: UsageSummary, samples: [UsageSample], palette: ModelPalette? = nil) {
         self.summary = summary
-        let palette = ModelPalette(samples: samples)
+        let palette = palette ?? ModelPalette(samples: samples)
         self.palette = palette
         // Hued models keep their own series. Grey models fold into one series so no
         // two lines share a color; a lone grey model keeps its name.
@@ -195,7 +235,7 @@ private struct TokenTotals: View {
     }
 }
 
-private struct TokenTypeBar: View {
+struct TokenTypeBar: View {
     let totals: TokenCounts
     @Environment(\.colorSchemeContrast) private var contrast
 

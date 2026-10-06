@@ -17,6 +17,7 @@ struct TokenModelSeries: Identifiable {
 
 struct TokenUsageChart: View {
     let data: TokenPageData
+    var height: CGFloat = 260
     @State private var hoveredDate: Date?
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -40,7 +41,7 @@ struct TokenUsageChart: View {
         VStack(alignment: .leading, spacing: 18) {
             Text(title).font(.headline)
             chart
-                .frame(height: 260)
+                .frame(height: height)
                 .accessibilityLabel(title)
                 .accessibilityValue("\(data.summary.totals.total) tokens across \(data.summary.sessions) sessions")
                 .accessibilityChartDescriptor(TokenChartAccessibility(data: data, title: title, maximum: maximum))

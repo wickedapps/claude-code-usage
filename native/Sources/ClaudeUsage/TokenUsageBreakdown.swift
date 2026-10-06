@@ -1,26 +1,29 @@
 import SwiftUI
 import ClaudeUsageCore
 
-struct TokenUsageBreakdown: View {
-    let summary: UsageSummary
-    let palette: ModelPalette
-    @State private var selection: Breakdown = .model
-    @State private var hoveredRow: String?
-    @Environment(\.colorSchemeContrast) private var contrast
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+enum TokenBreakdownKind: String, CaseIterable, Identifiable {
+    case model = "Model", day = "Day", project = "Project"
+    var id: String { rawValue }
 
-    private enum Breakdown: String, CaseIterable, Identifiable {
-        case model = "Model", day = "Day", project = "Project"
-        var id: String { rawValue }
-    }
-
-    private var rows: [UsageBreakdownRow] {
-        switch selection {
+    func rows(in summary: UsageSummary) -> [UsageBreakdownRow] {
+        switch self {
         case .model: return summary.models
         case .day: return summary.days
         case .project: return summary.projects
         }
     }
+}
+
+struct TokenUsageBreakdown: View {
+    let summary: UsageSummary
+    let palette: ModelPalette
+    let onSelect: (TokenBreakdownKind, UsageBreakdownRow) -> Void
+    @State private var selection: TokenBreakdownKind = .model
+    @State private var hoveredRow: String?
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var rows: [UsageBreakdownRow] { selection.rows(in: summary) }
     private var largestShare: Double { rows.map(\.share).max() ?? 0 }
 
     var body: some View {
@@ -29,7 +32,7 @@ struct TokenUsageBreakdown: View {
                 Text("Breakdown").font(.headline)
                 Spacer(minLength: 16)
                 Picker("Breakdown", selection: $selection) {
-                    ForEach(Breakdown.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(TokenBreakdownKind.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -68,6 +71,16 @@ struct TokenUsageBreakdown: View {
     }
 
     private func breakdownRow(_ row: UsageBreakdownRow, index: Int) -> some View {
+        Button { onSelect(selection, row) } label: { rowContent(row, index: index) }
+            .buttonStyle(.plain)
+            .onHover { hovering in hoveredRow = hovering ? row.id : nil }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(index + 1). \(row.title), \(row.sessions) sessions, \(UsageFormat.share(row.share)) of tokens, \(row.tokens.total) tokens")
+            .accessibilityHint("Shows details")
+            .accessibilityAddTraits(.isButton)
+    }
+
+    private func rowContent(_ row: UsageBreakdownRow, index: Int) -> some View {
         HStack(spacing: 16) {
             Text("\(index + 1)")
                 .font(.callout)
@@ -106,8 +119,5 @@ struct TokenUsageBreakdown: View {
                 .fill(Color(nsColor: .quaternaryLabelColor).opacity(hoveredRow == row.id ? (contrast == .increased ? 0.8 : 0.4) : 0))
         }
         .contentShape(Rectangle())
-        .onHover { hovering in hoveredRow = hovering ? row.id : nil }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(index + 1). \(row.title), \(row.sessions) sessions, \(UsageFormat.share(row.share)) of tokens, \(row.tokens.total) tokens")
     }
 }

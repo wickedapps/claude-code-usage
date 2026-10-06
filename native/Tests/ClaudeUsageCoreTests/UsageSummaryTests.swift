@@ -171,6 +171,60 @@ final class UsageSummaryTests: XCTestCase {
         XCTAssertEqual(summary.totals.input, 10)
     }
 
+    func testMatchingNarrowsTotalsSeriesAndBreakdowns() {
+        var report = UsageReport()
+        report.samples = [
+            sample("2026-10-03T20:00:00Z", session: "a", project: "Demo", model: "sonnet", input: 10),
+            sample("2026-10-04T10:00:00Z", session: "a", project: "Demo", model: "opus", input: 30),
+            sample("2026-10-04T11:00:00Z", session: "b", project: "Site", model: "sonnet", input: 20),
+        ]
+        let summary = report.summary(.week, now: now, timeZone: utc) { $0.model == "sonnet" }
+        XCTAssertEqual(summary.totals.input, 30)
+        XCTAssertEqual(summary.sessions, 2)
+        XCTAssertEqual(summary.models.map(\.id), ["sonnet"])
+        XCTAssertEqual(summary.projects.map(\.id), ["Site", "Demo"])
+        XCTAssertEqual(summary.projects.map(\.share), [2.0 / 3, 1.0 / 3])
+        XCTAssertEqual(summary.series[5].byModel, ["sonnet": 10])
+        XCTAssertEqual(summary.series[6].byModel, ["sonnet": 20])
+    }
+
+    func testDaySummaryHasLocalHoursOfThatDayOnly() throws {
+        let zone = TimeZone(identifier: "America/New_York")!
+        var report = UsageReport()
+        report.samples = [
+            sample("2026-10-03T03:00:00Z", session: "before", input: 100), // Oct 2, 23:00 local.
+            sample("2026-10-03T04:00:00Z", session: "a", input: 2),
+            sample("2026-10-03T20:00:00Z", session: "b", model: "opus", input: 3),
+            sample("2026-10-04T03:00:00Z", session: "a", input: 5),
+            sample("2026-10-04T04:00:00Z", session: "after", input: 100), // Oct 4, 00:00 local.
+        ]
+        let summary = try XCTUnwrap(report.summary(day: "2026-10-03", now: now, timeZone: zone))
+        XCTAssertEqual(summary.range, .day)
+        XCTAssertEqual(summary.series.count, 24)
+        XCTAssertEqual(summary.start, date("2026-10-03T04:00:00Z"))
+        XCTAssertEqual(summary.series.last?.start, date("2026-10-04T03:00:00Z"))
+        XCTAssertEqual(summary.totals.input, 10)
+        XCTAssertEqual(summary.sessions, 2)
+        XCTAssertEqual(summary.series[16].byModel, ["opus": 3])
+        XCTAssertEqual(summary.days.map(\.id), ["2026-10-03"])
+        XCTAssertNil(report.summary(day: "not a day", now: now, timeZone: zone))
+    }
+
+    func testDaySummaryForTodayStopsAtNowAndSpansDSTDays() throws {
+        var report = UsageReport()
+        report.samples = [
+            sample("2026-10-04T12:00:00Z", input: 2),
+            sample("2026-10-04T13:00:00Z", session: "future", input: 100),
+        ]
+        let today = try XCTUnwrap(report.summary(day: "2026-10-04", now: now, timeZone: utc))
+        XCTAssertEqual(today.series.count, 24)
+        XCTAssertEqual(today.end, now)
+        XCTAssertEqual(today.totals.input, 2)
+        let zone = TimeZone(identifier: "America/New_York")!
+        XCTAssertEqual(UsageReport().summary(day: "2026-11-01", now: now, timeZone: zone)?.series.count, 25)
+        XCTAssertEqual(UsageReport().summary(day: "2026-03-08", now: now, timeZone: zone)?.series.count, 23)
+    }
+
     func testHundredThousandSamplesAggregateWithoutLosingCounts() {
         let start = date("2026-07-07T00:00:00Z")
         var report = UsageReport()
