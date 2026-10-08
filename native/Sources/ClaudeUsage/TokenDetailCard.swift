@@ -128,17 +128,22 @@ struct TokenDetailCard: View {
                     .monospacedDigit()
             }
             Spacer(minLength: 12)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.body.weight(.medium))
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .keyboardShortcut(.cancelAction)
-            .help("Close")
-            .accessibilityLabel("Close")
+            closeButton
+                .labelStyle(.iconOnly)
+                .keyboardShortcut(.cancelAction)
+                .help("Close")
+        }
+    }
+
+    /// A round toolbar-sized button: Liquid Glass where available, a bordered circle before it.
+    @ViewBuilder private var closeButton: some View {
+        let button = Button(action: onClose) { Label("Close", systemImage: "xmark") }
+        if #available(macOS 26, *) {
+            button.buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.extraLarge)
+        } else if #available(macOS 14, *) {
+            button.buttonStyle(.bordered).buttonBorderShape(.circle).controlSize(.extraLarge)
+        } else {
+            button.buttonStyle(.bordered).controlSize(.large)
         }
     }
 
